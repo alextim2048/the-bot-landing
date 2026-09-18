@@ -7,17 +7,26 @@ readonly production_upload='/home/auth-deploy/uploads'
 readonly production_state='/var/lib/the-bot-landing'
 readonly production_caddy='/etc/caddy/Caddyfile'
 readonly baseline_caddy_sha='f17b0bed053548f13e4e96f6c8e51d83e5d93f1eddcc404b26e4c0a9aab1615d'
+readonly production_policy_deployment='landing-c3abfb3ee76616c9c85313aa958dd5b88a6592a8-20260918100401'
+readonly production_policy_source='c3abfb3ee76616c9c85313aa958dd5b88a6592a8'
+readonly production_policy_before_caddy_sha='60b10991eb32235fc9b462c4d7aadd923b795ad3df774b476ca8a1389594df9a'
 
 if [[ ${BASH_SOURCE[0]} != "$0" && -n ${THE_BOT_LANDING_TEST_ROOT-} ]]; then
   landing_root="$THE_BOT_LANDING_TEST_ROOT/www"; upload_root="$THE_BOT_LANDING_TEST_ROOT/uploads"
   state_root="$THE_BOT_LANDING_TEST_ROOT/state"; caddyfile="$THE_BOT_LANDING_TEST_ROOT/Caddyfile"
   expected_caddy_sha=${THE_BOT_LANDING_TEST_CADDY_SHA:?}; test_mode=1
+  policy_deployment=${THE_BOT_LANDING_TEST_POLICY_DEPLOYMENT:?}
+  policy_source=${THE_BOT_LANDING_TEST_POLICY_SOURCE:?}
+  policy_before_caddy_sha=${THE_BOT_LANDING_TEST_POLICY_CADDY_SHA:?}
 else
   landing_root=$production_root; upload_root=$production_upload; state_root=$production_state
   caddyfile=$production_caddy; expected_caddy_sha=$baseline_caddy_sha; test_mode=0
+  policy_deployment=$production_policy_deployment; policy_source=$production_policy_source
+  policy_before_caddy_sha=$production_policy_before_caddy_sha
 fi
 releases_root="$landing_root/releases"; records_root="$landing_root/deployments"; current_link="$landing_root/current"
 routing_state="$state_root/routing-v1.record"
+policy_state="$state_root/html-policy-v1.record"
 readonly max_release_bytes=104857600
 
 fail(){ printf 'LANDING_OPERATOR_ERROR %s\n' "$1" >&2; return 1; }
@@ -109,8 +118,25 @@ http_200(){
   unlink "$body"
 }
 service_checks(){ http_200 https://the-bot.ru/auth 'id="auth-heading">ВХОД</h1>' && http_200 https://avito.the-bot.ru/healthz '"status":"ok"'; }
+public_root_reachable(){ http_200 https://the-bot.ru/; }
 public_root_check(){ http_200 https://the-bot.ru/ 'href="https://the-bot.ru/auth">Войти</a>'; }
 public_full_check(){ public_root_check && http_200 https://the-bot.ru/schools/ 'Платформа для управления репетиторским центром' && http_200 https://the-bot.ru/site.webmanifest && http_200 https://the-bot.ru/assets/brand/favicon.ico && service_checks; }
+http_no_store_200(){
+  local url=$1 body headers status
+  body=$(mktemp "$state_root/http.XXXXXX"); headers=$(mktemp "$state_root/http-headers.XXXXXX")
+  if ! status=$(curl --silent --show-error --max-time 15 --output "$body" --dump-header "$headers" --write-out '%{http_code}' "$url"); then unlink "$body"; unlink "$headers"; fail http_transport; return 1; fi
+  if [[ $status != 200 ]] || grep -Eiq '^location:' "$headers" || ! grep -Eiq '^cache-control:[[:space:]]*no-store,[[:space:]]*max-age=0[[:space:]]*$' "$headers"; then unlink "$body"; unlink "$headers"; fail html_cache_policy; return 1; fi
+  unlink "$body"; unlink "$headers"
+}
+http_release_redirect(){
+  local body headers status location
+  body=$(mktemp "$state_root/http.XXXXXX"); headers=$(mktemp "$state_root/http-headers.XXXXXX")
+  if ! status=$(curl --silent --show-error --max-time 15 --output "$body" --dump-header "$headers" --write-out '%{http_code}' https://the-bot.ru/release.html); then unlink "$body"; unlink "$headers"; fail http_transport; return 1; fi
+  location=$(sed -n 's/^[Ll]ocation:[[:space:]]*\([^[:space:]\r]*\)[[:space:]\r]*$/\1/p' "$headers" | tail -n1)
+  if [[ $status != 308 || $location != / ]]; then unlink "$body"; unlink "$headers"; fail release_redirect_policy; return 1; fi
+  unlink "$body"; unlink "$headers"
+}
+public_html_policy_check(){ http_no_store_200 https://the-bot.ru/ && http_no_store_200 https://the-bot.ru/index.html && http_release_redirect && service_checks; }
 record_path(){ printf '%s/%s.record' "$records_root" "$1"; }
 record_value(){ sed -n "s/^$2=//p" "$1" | head -n1; }
 replace_symlink(){ if [[ $test_mode == 1 ]]; then mv -fh "$1" "$2"; else mv -Tf "$1" "$2"; fi; }
@@ -119,6 +145,11 @@ validate_private_file(){
   [[ $test_mode == 1 ]] && root_uid=$(id -u)
   [[ -f $file && ! -L $file && $(stat_value %F "$file") == 'regular file' && $(stat_value %u "$file") == "$root_uid" && $(stat_value %a "$file") == 600 && $(stat_value %h "$file") == 1 ]] || fail private_file_metadata
   [[ $(wc -l <"$file" | tr -d ' ') == "$lines" ]] || fail private_file_shape
+}
+validate_private_blob(){
+  local file=$1 root_uid=0
+  [[ $test_mode == 1 ]] && root_uid=$(id -u)
+  [[ -f $file && ! -L $file && $(realpath "$file") == "$file" && $(stat_value %F "$file") == 'regular file' && $(stat_value %u "$file") == "$root_uid" && $(stat_value %a "$file") == 600 && $(stat_value %h "$file") == 1 ]] || fail private_blob_metadata
 }
 validate_record(){
   validate_private_file "$1" 8 || fail deployment_record_metadata
@@ -207,18 +238,207 @@ prepare_release(){
   printf 'LANDING_RELEASE_PREPARED source=%s deployment=%s previous=%s\n' "$source" "$deployment" "$previous"
 }
 validate_caddy_shape(){
-  [[ $(grep -Fc 'root * /var/www/the-bot-landing/current' "$1") == 1 ]] || fail caddy_root
-  [[ $(grep -Fc 'reverse_proxy 127.0.0.1:3001' "$1") == 1 ]] || fail caddy_fallback
+  local status=0
+  awk '
+    BEGIN { targets=0; inside=0; depth=0; roots=0; fallbacks=0 }
+    /^[[:space:]]*the-bot\.ru[[:space:]]*\{[[:space:]]*$/ && !inside {
+      targets++; inside=1; depth=0
+    }
+    inside {
+      if ($0 ~ /^[[:space:]]*root[[:space:]]+\*[[:space:]]+\/var\/www\/the-bot-landing\/current([[:space:]]|$)/) roots++
+      if ($0 ~ /^[[:space:]]*reverse_proxy[[:space:]]+127\.0\.0\.1:3001([[:space:]]|$)/) fallbacks++
+      line=$0; opens=gsub(/\{/, "{", line); closes=gsub(/\}/, "}", line); depth+=opens-closes
+      if (depth==0) inside=0
+    }
+    END {
+      if (inside || targets!=1) exit 41
+      if (roots!=1) exit 42
+      if (fallbacks!=1) exit 43
+    }
+  ' "$1" || status=$?
+  case $status in
+    0) return;;
+    42) fail caddy_root;;
+    43) fail caddy_fallback;;
+    *) fail caddy_site;;
+  esac
+}
+validate_caddy_routes(){
+  awk '
+    BEGIN { targets=0; inside=0; depth=0; routes=0 }
+    /^[[:space:]]*the-bot\.ru[[:space:]]*\{[[:space:]]*$/ && !inside {
+      targets++; inside=1; depth=0
+    }
+    inside {
+      if (index($0, "/site.webmanifest /assets/brand/* /schools /schools/*")) routes++
+      line=$0; opens=gsub(/\{/, "{", line); closes=gsub(/\}/, "}", line); depth+=opens-closes
+      if (depth==0) inside=0
+    }
+    END { exit !(targets==1 && !inside && routes==1) }
+  ' "$1" || fail caddy_routes
+}
+validate_live_caddy(){
+  local file=$1 root_uid=0
+  [[ $test_mode == 1 ]] && root_uid=$(id -u)
+  [[ -f $file && ! -L $file && $(realpath "$file") == "$file" && $(stat_value %F "$file") == 'regular file' && $(stat_value %u "$file") == "$root_uid" && $(stat_value %a "$file") == 644 && $(stat_value %h "$file") == 1 ]] || fail caddyfile_metadata
+}
+normalize_legacy_live_caddy(){
+  local deployment=$1 source=$2 digest=$3 release=$4 previous=$5 release_hash=$6 root_uid=0 mode journal backup phase before after current_sha
+  [[ $test_mode == 1 ]] && root_uid=$(id -u)
+  [[ -f $caddyfile && ! -L $caddyfile && $(realpath "$caddyfile") == "$caddyfile" && $(stat_value %F "$caddyfile") == 'regular file' && $(stat_value %u "$caddyfile") == "$root_uid" && $(stat_value %h "$caddyfile") == 1 ]] || fail caddyfile_metadata
+  mode=$(stat_value %a "$caddyfile"); [[ $mode == 644 ]] && return
+  [[ $mode == 600 ]] || fail caddyfile_metadata
+  journal=$(journal_path routing "$deployment"); backup="$state_root/caddy-${deployment}.before"
+  [[ -e $journal && -f $backup && ! -L $backup && $(stat_value %F "$backup") == 'regular file' && $(stat_value %u "$backup") == "$root_uid" && $(stat_value %a "$backup") == 600 && $(stat_value %h "$backup") == 1 ]] || fail caddyfile_legacy_state
+  validate_journal_identity "$journal" routing "$deployment" "$source" "$digest" "$release" "$previous" "$release_hash"
+  phase=$(record_value "$journal" phase); [[ $phase == restoring || $phase == rolled-back ]] || fail caddyfile_legacy_phase
+  before=$(record_value "$journal" before_sha); after=$(record_value "$journal" after_sha)
+  [[ $before == "$expected_caddy_sha" && $(sha256_file "$backup") == "$expected_caddy_sha" ]] || fail caddyfile_legacy_backup
+  require_hex "$after" 64 || fail caddyfile_legacy_state
+  current_sha=$(sha256_file "$caddyfile"); [[ $current_sha == "$before" || $current_sha == "$after" ]] || fail caddyfile_legacy_hash
+  chmod 0644 "$caddyfile"; fsync_path "$caddyfile"; validate_live_caddy "$caddyfile"
+}
+install_live_caddy(){
+  if [[ $test_mode == 0 ]]; then install -o root -g root -m 0644 "$1" "$2"; else install -m 0644 "$1" "$2"; fi
 }
 render_caddy(){
-  local source=$1 target=$2
-  awk 'BEGIN{n=0} index($0," path ")&&index($0," / ")&&index($0," /privacy.html")&&index($0," /legal.css") {print $0 " /site.webmanifest /assets/brand/* /schools /schools/*";n++;next} {print} END{if(n!=1)exit 42}' "$source" >"$target"
-  grep -Fq '/site.webmanifest /assets/brand/* /schools /schools/*' "$target" || fail caddy_routes
+  local source=$1 target=$2 status=0
+  awk '
+    BEGIN { targets=0; inside=0; depth=0; rewrites=0 }
+    /^[[:space:]]*the-bot\.ru[[:space:]]*\{[[:space:]]*$/ && !inside {
+      targets++; inside=1; depth=0
+    }
+    {
+      if (inside && index($0," path ") && index($0," / ") && index($0," /privacy.html") && index($0," /legal.css")) {
+        print $0 " /site.webmanifest /assets/brand/* /schools /schools/*"; rewrites++
+      } else print
+      if (inside) {
+        line=$0; opens=gsub(/\{/, "{", line); closes=gsub(/\}/, "}", line); depth+=opens-closes
+        if (depth==0) inside=0
+      }
+    }
+    END { if (inside || targets!=1 || rewrites!=1) exit 42 }
+  ' "$source" >"$target" || status=$?
+  [[ $status == 0 ]] || fail caddy_routes
+  validate_caddy_shape "$target"; validate_caddy_routes "$target"
+}
+validate_html_policy(){
+  awk '
+    BEGIN { targets=0; inside=0; depth=0; release_matchers=0; redirects=0; html_matchers=0; headers=0 }
+    /^[[:space:]]*the-bot\.ru[[:space:]]*\{[[:space:]]*$/ && !inside {
+      targets++; inside=1; depth=0
+    }
+    inside {
+      if ($0 ~ /^[[:space:]]*@legacy_release[[:space:]]+path[[:space:]]+\/release\.html[[:space:]]*$/) release_matchers++
+      if ($0 ~ /^[[:space:]]*redir[[:space:]]+@legacy_release[[:space:]]+\/[[:space:]]+308[[:space:]]*$/) redirects++
+      if ($0 ~ /^[[:space:]]*@landing_html[[:space:]]+path[[:space:]]+\/[[:space:]]+\/index\.html[[:space:]]*$/) html_matchers++
+      if ($0 ~ /^[[:space:]]*header[[:space:]]+@landing_html[[:space:]]+Cache-Control[[:space:]]+"no-store, max-age=0"[[:space:]]*$/) headers++
+      line=$0; opens=gsub(/\{/, "{", line); closes=gsub(/\}/, "}", line); depth+=opens-closes
+      if (depth==0) inside=0
+    }
+    END { exit !(targets==1 && !inside && release_matchers==1 && redirects==1 && html_matchers==1 && headers==1) }
+  ' "$1" || fail html_policy_shape
+}
+render_html_policy(){
+  local source=$1 target=$2 status=0
+  awk '
+    BEGIN { targets=0; inside=0; depth=0; inserts=0 }
+    /^[[:space:]]*the-bot\.ru[[:space:]]*\{[[:space:]]*$/ && !inside {
+      targets++; inside=1; depth=0
+    }
+    {
+      if (inside && $0 ~ /^[[:space:]]*@landing[[:space:]]+path[[:space:]]+\/[[:space:]]+/) {
+        match($0,/^[[:space:]]*/); indent=substr($0,1,RLENGTH)
+        print indent "@legacy_release path /release.html"
+        print indent "redir @legacy_release / 308"
+        print indent "@landing_html path / /index.html"
+        print indent "header @landing_html Cache-Control \"no-store, max-age=0\""
+        inserts++
+      }
+      print
+      if (inside) {
+        line=$0; opens=gsub(/\{/, "{", line); closes=gsub(/\}/, "}", line); depth+=opens-closes
+        if (depth==0) inside=0
+      }
+    }
+    END { if (inside || targets!=1 || inserts!=1) exit 42 }
+  ' "$source" >"$target" || status=$?
+  [[ $status == 0 ]] || fail html_policy_render
+  validate_caddy_shape "$target"; validate_caddy_routes "$target"; validate_html_policy "$target"
 }
 restore_caddy(){
   local backup=$1 temporary="${caddyfile}.restore-$$"
-  cp -p "$backup" "$temporary"; fsync_path "$temporary"; mv -f "$temporary" "$caddyfile"; fsync_path "$(dirname "$caddyfile")"
-  caddy validate --config "$caddyfile" >/dev/null && systemctl reload caddy
+  install_live_caddy "$backup" "$temporary"; fsync_path "$temporary"; mv -f "$temporary" "$caddyfile"; fsync_path "$(dirname "$caddyfile")"; validate_live_caddy "$caddyfile"
+  caddy validate --config "$caddyfile" --adapter caddyfile >/dev/null && systemctl reload caddy
+}
+apply_html_policy(){
+  local deployment=$1 record source digest release previous release_hash routing_sha current backup candidate journal temporary before_sha after_sha state_before state_after state_tmp phase policy_failure=0
+  [[ $deployment == "$policy_deployment" ]] || fail html_policy_deployment
+  validate_roots; record=$(record_path "$deployment"); validate_record "$record"
+  [[ $(record_value "$record" state) == active ]] || fail html_policy_record
+  source=$(record_value "$record" source); digest=$(record_value "$record" digest); release=$(record_value "$record" release); previous=$(record_value "$record" previous); routing_sha=$(record_value "$record" routing_sha); release_hash=$(record_value "$record" release_sha)
+  [[ $source == "$policy_source" && $release == "$releases_root/$deployment" && -d $release && $(release_sha "$release") == "$release_hash" && $(current_release) == "$release" ]] || fail html_policy_identity
+  [[ -f $release/.the-bot-release && $(record_value "$release/.the-bot-release" deployment) == "$deployment" && $(record_value "$release/.the-bot-release" source) == "$source" && $(record_value "$release/.the-bot-release" digest) == "$digest" ]] || fail html_policy_release_marker
+  validate_live_caddy "$caddyfile"; current=$(sha256_file "$caddyfile")
+  [[ $routing_sha == "$policy_before_caddy_sha" ]] || fail html_policy_routing_sha
+  validate_private_file "$routing_state" 2 || fail html_policy_routing_state
+  [[ $(record_value "$routing_state" baseline) == "$expected_caddy_sha" && $(record_value "$routing_state" routed) == "$policy_before_caddy_sha" ]] || fail html_policy_routing_state
+  if [[ -e $policy_state ]]; then
+    validate_private_file "$policy_state" 2 || fail html_policy_state
+    state_before=$(record_value "$policy_state" before); state_after=$(record_value "$policy_state" after)
+    [[ $state_before == "$policy_before_caddy_sha" && $state_after == "$current" ]] || fail html_policy_state
+    validate_caddy_shape "$caddyfile"; validate_caddy_routes "$caddyfile"; validate_html_policy "$caddyfile"
+    public_html_policy_check || fail html_policy_reuse_health
+    printf 'LANDING_HTML_POLICY_REUSED deployment=%s caddy_sha256=%s\n' "$deployment" "$current"; return
+  fi
+  backup="$state_root/caddy-${deployment}.html-policy.before"; candidate="$state_root/caddy-${deployment}.html-policy.candidate"; journal=$(journal_path html-policy "$deployment")
+  if [[ ! -e $journal ]]; then
+    [[ $current == "$policy_before_caddy_sha" ]] || fail html_policy_unjournaled_change
+    write_journal "$journal" html-policy intent "$deployment" "$source" "$digest" "$release" "$previous" "$policy_before_caddy_sha" PENDING "$release_hash"
+  else validate_journal_identity "$journal" html-policy "$deployment" "$source" "$digest" "$release" "$previous" "$release_hash"
+  fi
+  checkpoint html_policy_before_backup
+  if [[ -e $backup ]]; then validate_private_blob "$backup"; [[ $(sha256_file "$backup") == "$policy_before_caddy_sha" ]] || fail html_policy_backup_mismatch
+  else
+    [[ $current == "$policy_before_caddy_sha" ]] || fail html_policy_backup_missing
+    temporary="${backup}.tmp-$$"; cp -p "$caddyfile" "$temporary"; chmod 0600 "$temporary"; fsync_path "$temporary"; mv -f "$temporary" "$backup"; fsync_path "$state_root"; validate_private_blob "$backup"
+  fi
+  checkpoint html_policy_after_backup
+  render_html_policy "$backup" "$candidate"; chmod 0600 "$candidate"; validate_private_blob "$candidate"; caddy validate --config "$candidate" --adapter caddyfile >/dev/null || fail html_policy_candidate
+  after_sha=$(sha256_file "$candidate"); before_sha=$(record_value "$journal" before_sha)
+  [[ $before_sha == "$policy_before_caddy_sha" && ( $(record_value "$journal" after_sha) == PENDING || $(record_value "$journal" after_sha) == "$after_sha" ) ]] || fail html_policy_journal
+  phase=$(record_value "$journal" phase)
+  if [[ $phase != verified ]]; then write_journal "$journal" html-policy candidate-ready "$deployment" "$source" "$digest" "$release" "$previous" "$policy_before_caddy_sha" "$after_sha" "$release_hash"; fi
+  current=$(sha256_file "$caddyfile"); [[ $current == "$policy_before_caddy_sha" || $current == "$after_sha" ]] || fail html_policy_changed
+  [[ $phase != verified || $current == "$after_sha" ]] || fail html_policy_verified_state
+  if [[ $current == "$policy_before_caddy_sha" ]]; then
+    write_journal "$journal" html-policy caddy-changing "$deployment" "$source" "$digest" "$release" "$previous" "$policy_before_caddy_sha" "$after_sha" "$release_hash"
+    checkpoint html_policy_before_caddy
+    install_live_caddy "$candidate" "${caddyfile}.candidate-$$"; fsync_path "${caddyfile}.candidate-$$"; mv -f "${caddyfile}.candidate-$$" "$caddyfile"; fsync_path "$(dirname "$caddyfile")"; validate_live_caddy "$caddyfile"
+    checkpoint html_policy_after_caddy
+  fi
+  phase=$(record_value "$journal" phase)
+  if [[ $phase != verified ]]; then
+    write_journal "$journal" html-policy caddy-installed "$deployment" "$source" "$digest" "$release" "$previous" "$policy_before_caddy_sha" "$after_sha" "$release_hash"
+    checkpoint html_policy_before_reload
+    if ! caddy validate --config "$caddyfile" --adapter caddyfile >/dev/null || ! systemctl reload caddy; then policy_failure=1; fi
+    checkpoint html_policy_after_reload
+    if ((policy_failure==0)) && ! public_html_policy_check; then policy_failure=1; fi
+  else public_html_policy_check || policy_failure=1
+  fi
+  if ((policy_failure)); then
+    write_journal "$journal" html-policy restoring "$deployment" "$source" "$digest" "$release" "$previous" "$policy_before_caddy_sha" "$after_sha" "$release_hash"
+    restore_caddy "$backup" || fail html_policy_restore_ambiguous
+    public_root_reachable && service_checks || fail html_policy_restore_health_ambiguous
+    write_journal "$journal" html-policy rolled-back "$deployment" "$source" "$digest" "$release" "$previous" "$policy_before_caddy_sha" "$after_sha" "$release_hash"
+    fail html_policy_rolled_back
+  fi
+  write_journal "$journal" html-policy verified "$deployment" "$source" "$digest" "$release" "$previous" "$policy_before_caddy_sha" "$after_sha" "$release_hash"
+  checkpoint html_policy_before_state
+  state_tmp="${policy_state}.tmp-$$"; (umask 077; printf 'before=%s\nafter=%s\n' "$policy_before_caddy_sha" "$after_sha" >"$state_tmp"); chmod 0600 "$state_tmp"; fsync_path "$state_tmp"; mv -f "$state_tmp" "$policy_state"; fsync_path "$state_root"
+  checkpoint html_policy_after_state
+  write_journal "$journal" html-policy done "$deployment" "$source" "$digest" "$release" "$previous" "$policy_before_caddy_sha" "$after_sha" "$release_hash"
+  printf 'LANDING_HTML_POLICY_READY deployment=%s caddy_sha256=%s\n' "$deployment" "$after_sha"
 }
 apply_routing(){
   local deployment=$1 record backup candidate current_sha routed_sha state_sha state_baseline state_tmp journal source digest release previous release_hash temporary routing_failure=0
@@ -226,13 +446,20 @@ apply_routing(){
   validate_roots; record=$(record_path "$deployment"); validate_record "$record"; [[ $(record_value "$record" state) == prepared || $(record_value "$record" state) == routing-ready ]] || fail prepared_record
   source=$(record_value "$record" source); digest=$(record_value "$record" digest); release=$(record_value "$record" release); previous=$(record_value "$record" previous); release_hash=$(record_value "$record" release_sha)
   [[ -d $release && $(release_sha "$release") == "$release_hash" ]] || fail release_identity
-  [[ -f $caddyfile && ! -L $caddyfile && $(realpath "$caddyfile") == "$caddyfile" ]] || fail caddyfile; current_sha=$(sha256_file "$caddyfile")
+  normalize_legacy_live_caddy "$deployment" "$source" "$digest" "$release" "$previous" "$release_hash"; validate_live_caddy "$caddyfile"; current_sha=$(sha256_file "$caddyfile")
   if [[ $current_sha != "$expected_caddy_sha" && -e $routing_state ]]; then
     validate_private_file "$routing_state" 2 || fail caddy_sha
     state_baseline=$(record_value "$routing_state" baseline); state_sha=$(record_value "$routing_state" routed)
-    [[ $state_baseline == "$expected_caddy_sha" && $state_sha == "$current_sha" ]] || fail caddy_routing_state
-    validate_caddy_shape "$caddyfile"; grep -Fq '/site.webmanifest /assets/brand/* /schools /schools/*' "$caddyfile" || fail caddy_routes
-    public_root_check && service_checks || fail caddy_reuse_health
+    [[ $state_baseline == "$expected_caddy_sha" ]] || fail caddy_routing_state
+    if [[ $state_sha == "$current_sha" ]]; then
+      validate_caddy_shape "$caddyfile"; validate_caddy_routes "$caddyfile"
+      public_root_reachable && service_checks || fail caddy_reuse_health
+    else
+      validate_private_file "$policy_state" 2 || fail caddy_routing_state
+      [[ $(record_value "$policy_state" before) == "$state_sha" && $(record_value "$policy_state" after) == "$current_sha" ]] || fail caddy_routing_state
+      validate_caddy_shape "$caddyfile"; validate_caddy_routes "$caddyfile"; validate_html_policy "$caddyfile"
+      public_html_policy_check || fail caddy_reuse_health
+    fi
     journal=$(journal_path routing "$deployment"); write_journal "$journal" routing intent "$deployment" "$source" "$digest" "$release" "$previous" "$current_sha" "$current_sha" "$release_hash"
     checkpoint routing_before_record
     write_record "$record" routing-ready "$source" "$digest" "$release" "$previous" "$current_sha" "$release_hash"
@@ -251,7 +478,7 @@ apply_routing(){
   fi
   checkpoint routing_after_backup
   validate_caddy_shape "$backup"; candidate="$state_root/caddy-${deployment}.candidate"; checkpoint routing_before_candidate; render_caddy "$backup" "$candidate"; checkpoint routing_after_candidate
-  caddy validate --config "$candidate" >/dev/null || fail caddy_candidate
+  caddy validate --config "$candidate" --adapter caddyfile >/dev/null || fail caddy_candidate
   routed_sha=$(sha256_file "$candidate")
   validate_journal_identity "$journal" routing "$deployment" "$source" "$digest" "$release" "$previous" "$release_hash"
   [[ $(record_value "$journal" before_sha) == "$expected_caddy_sha" && ( $(record_value "$journal" after_sha) == PENDING || $(record_value "$journal" after_sha) == "$routed_sha" ) ]] || fail routing_journal_mismatch
@@ -260,18 +487,18 @@ apply_routing(){
   if [[ $current_sha == "$expected_caddy_sha" ]]; then
     write_journal "$journal" routing caddy-changing "$deployment" "$source" "$digest" "$release" "$previous" "$expected_caddy_sha" "$routed_sha" "$release_hash"
     checkpoint routing_before_caddy
-    install -m 0644 "$candidate" "${caddyfile}.candidate-$$"; fsync_path "${caddyfile}.candidate-$$"; mv -f "${caddyfile}.candidate-$$" "$caddyfile"; fsync_path "$(dirname "$caddyfile")"
+    install_live_caddy "$candidate" "${caddyfile}.candidate-$$"; fsync_path "${caddyfile}.candidate-$$"; mv -f "${caddyfile}.candidate-$$" "$caddyfile"; fsync_path "$(dirname "$caddyfile")"; validate_live_caddy "$caddyfile"
     checkpoint routing_after_caddy
   fi
   write_journal "$journal" routing caddy-installed "$deployment" "$source" "$digest" "$release" "$previous" "$expected_caddy_sha" "$routed_sha" "$release_hash"
   checkpoint routing_before_reload
-  if ! caddy validate --config "$caddyfile" >/dev/null || ! systemctl reload caddy; then routing_failure=1; fi
+  if ! caddy validate --config "$caddyfile" --adapter caddyfile >/dev/null || ! systemctl reload caddy; then routing_failure=1; fi
   checkpoint routing_after_reload
-  if ((routing_failure==0)) && { ! public_root_check || ! service_checks; }; then routing_failure=1; fi
+  if ((routing_failure==0)) && { ! public_root_reachable || ! service_checks; }; then routing_failure=1; fi
   if ((routing_failure)); then
     write_journal "$journal" routing restoring "$deployment" "$source" "$digest" "$release" "$previous" "$expected_caddy_sha" "$routed_sha" "$release_hash"
     restore_caddy "$backup" || fail caddy_restore_ambiguous
-    public_root_check && service_checks || fail caddy_restore_health_ambiguous
+    public_root_reachable && service_checks || fail caddy_restore_health_ambiguous
     write_journal "$journal" routing rolled-back "$deployment" "$source" "$digest" "$release" "$previous" "$expected_caddy_sha" "$routed_sha" "$release_hash"
     fail caddy_routing_rolled_back
   fi
@@ -330,7 +557,7 @@ rollback_release(){
     temporary="$landing_root/.rollback-${deployment}-$$"; ln -s "$previous" "$temporary"; replace_symlink "$temporary" "$current_link"; fsync_path "$landing_root"
     checkpoint rollback_after_symlink
   fi
-  public_root_check && service_checks || fail rollback_postcheck_ambiguous
+  public_root_reachable && service_checks || fail rollback_postcheck_ambiguous
   write_journal "$journal" rollback verified "$deployment" "$source" "$digest" "$release" "$previous" "$routing_sha" "$routing_sha" "$release_hash"
   checkpoint rollback_before_record
   write_record "$record" rolled-back "$source" "$digest" "$release" "$previous" "$routing_sha" "$release_hash"
@@ -344,7 +571,7 @@ main(){
   [[ -z ${THE_BOT_LANDING_TEST_ROOT-} && -z ${THE_BOT_LANDING_TEST_CADDY_SHA-} && -z ${THE_BOT_LANDING_FAIL_AT-} ]] || fail test_environment
   export PATH=/usr/sbin:/usr/bin:/sbin:/bin
   local action=${1-}; shift || true
-  if [[ $action == prepare || $action == routing || $action == deploy || $action == rollback ]]; then
+  if [[ $action == prepare || $action == routing || $action == deploy || $action == rollback || $action == html-policy ]]; then
     validate_roots; exec 9>"$state_root/operator.lock"; flock -x 9
   fi
   case "$action" in
@@ -352,6 +579,7 @@ main(){
     preflight) (($#==4))||fail arguments; preflight "$@";;
     prepare) (($#==4))||fail arguments; prepare_release "$@";;
     routing) (($#==1))||fail arguments; apply_routing "$1";;
+    html-policy) (($#==1))||fail arguments; apply_html_policy "$1";;
     deploy) (($#==1))||fail arguments; activate_release "$1";;
     rollback) (($#==1))||fail arguments; rollback_release "$1";;
     *) fail action;;
