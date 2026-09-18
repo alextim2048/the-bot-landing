@@ -38,6 +38,9 @@ for (const page of pages) {
 }
 
 const home = fs.readFileSync(path.join(repositoryRoot, "index.html"), "utf8");
+if (!home.includes('href="https://the-bot.ru/auth">Войти</a>')) {
+  failures.push("index.html: missing canonical production login CTA");
+}
 if (!home.includes('href="/schools/">Подать заявку</a>')) {
   failures.push("index.html: missing schools application CTA");
 }
