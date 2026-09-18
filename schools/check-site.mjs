@@ -37,6 +37,14 @@ for (const page of pages) {
   }
 }
 
+const home = fs.readFileSync(path.join(repositoryRoot, "index.html"), "utf8");
+if (!home.includes('href="/schools/">Подать заявку</a>')) {
+  failures.push("index.html: missing schools application CTA");
+}
+if (/Единая платформа|Единая точка входа в продукты THE БОТ\.|<header\b/.test(home)) {
+  failures.push("index.html: removed root header or copy is present");
+}
+
 if (failures.length > 0) {
   console.error(failures.join("\n"));
   process.exit(1);
