@@ -119,6 +119,20 @@ for(const url of ["https://the-bot.ru/","https://the-bot.ru/schools/","https://t
 let scenario=20;
 const nextId=()=>`landing-${source}-20260918${String(200000+scenario++).padStart(6,"0")}`;
 const prepareFixture=f=>act(f,"prepare",[f.copy,source,f.digest,f.deployment]);
+const recordValue=(body,key)=>body.match(new RegExp(`^${key}=(.*)$`,"m"))?.[1];
+function seedLegacyRoutingFailure(f){
+  const recordBody=readFileSync(path.join(f.www,"deployments",`${f.deployment}.record`),"utf8"),release=recordValue(recordBody,"release"),previousRelease=recordValue(recordBody,"previous"),releaseHash=recordValue(recordBody,"release_sha");
+  const routed=caddy.replace(" /problem-rules.png"," /problem-rules.png /site.webmanifest /assets/brand/* /schools /schools/*"),before=sha(Buffer.from(caddy)),after=sha(Buffer.from(routed));
+  const backup=path.join(f.state,`caddy-${f.deployment}.before`),journal=path.join(f.state,`routing-${f.deployment}.journal`);
+  writeFileSync(backup,caddy,{mode:0o600});chmodSync(backup,0o600);
+  writeFileSync(journal,`version=1\noperation=routing\nphase=restoring\ndeployment=${f.deployment}\nsource=${source}\ndigest=${f.digest}\nrelease=${release}\nprevious=${previousRelease}\nbefore_sha=${before}\nafter_sha=${after}\nrelease_sha=${releaseHash}\n`,{mode:0o600});chmodSync(journal,0o600);chmodSync(f.caddyPath,0o600);
+}
+const legacy=makeFixture("legacy-mode",bodyA,nextId());assert.equal(prepareFixture(legacy).status,0);seedLegacyRoutingFailure(legacy);
+const legacyReconciled=act(legacy,"routing",[legacy.deployment]);assert.equal(legacyReconciled.status,0,legacyReconciled.stderr);assert.match(legacyReconciled.stdout,/LANDING_ROUTING_READY/);assert.equal(lstatSync(legacy.caddyPath).mode&0o777,0o644);assert.equal(readlinkSync(path.join(legacy.www,"current")),legacy.previous);
+const unrelatedLegacy=makeFixture("legacy-unrelated",bodyA,nextId());assert.equal(prepareFixture(unrelatedLegacy).status,0);chmodSync(unrelatedLegacy.caddyPath,0o600);
+const unrelatedRejected=act(unrelatedLegacy,"routing",[unrelatedLegacy.deployment]);assert.notEqual(unrelatedRejected.status,0);assert.match(unrelatedRejected.stderr,/caddyfile_legacy_state/);assert.equal(lstatSync(unrelatedLegacy.caddyPath).mode&0o777,0o600);
+const mismatchedLegacy=makeFixture("legacy-mismatch",bodyA,nextId());assert.equal(prepareFixture(mismatchedLegacy).status,0);seedLegacyRoutingFailure(mismatchedLegacy);writeFileSync(mismatchedLegacy.caddyPath,`${caddy}# unrelated change\n`,{mode:0o600});chmodSync(mismatchedLegacy.caddyPath,0o600);
+const mismatchedRejected=act(mismatchedLegacy,"routing",[mismatchedLegacy.deployment]);assert.notEqual(mismatchedRejected.status,0);assert.match(mismatchedRejected.stderr,/caddyfile_legacy_hash/);assert.equal(lstatSync(mismatchedLegacy.caddyPath).mode&0o777,0o600);
 for(const phase of ["prepare_after_freeze","prepare_before_release_move","prepare_after_release_move","prepare_before_record","prepare_after_record"]){
   const f=makeFixture(phase,bodyA,nextId()),interrupted=act(f,"prepare",[f.copy,source,f.digest,f.deployment],{THE_BOT_LANDING_FAIL_AT:phase});
   assert.notEqual(interrupted.status,0,phase);assert.match(interrupted.stderr,new RegExp(`injected:${phase}`));

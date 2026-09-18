@@ -252,6 +252,22 @@ validate_live_caddy(){
   [[ $test_mode == 1 ]] && root_uid=$(id -u)
   [[ -f $file && ! -L $file && $(realpath "$file") == "$file" && $(stat_value %F "$file") == 'regular file' && $(stat_value %u "$file") == "$root_uid" && $(stat_value %a "$file") == 644 && $(stat_value %h "$file") == 1 ]] || fail caddyfile_metadata
 }
+normalize_legacy_live_caddy(){
+  local deployment=$1 source=$2 digest=$3 release=$4 previous=$5 release_hash=$6 root_uid=0 mode journal backup phase before after current_sha
+  [[ $test_mode == 1 ]] && root_uid=$(id -u)
+  [[ -f $caddyfile && ! -L $caddyfile && $(realpath "$caddyfile") == "$caddyfile" && $(stat_value %F "$caddyfile") == 'regular file' && $(stat_value %u "$caddyfile") == "$root_uid" && $(stat_value %h "$caddyfile") == 1 ]] || fail caddyfile_metadata
+  mode=$(stat_value %a "$caddyfile"); [[ $mode == 644 ]] && return
+  [[ $mode == 600 ]] || fail caddyfile_metadata
+  journal=$(journal_path routing "$deployment"); backup="$state_root/caddy-${deployment}.before"
+  [[ -e $journal && -f $backup && ! -L $backup && $(stat_value %F "$backup") == 'regular file' && $(stat_value %u "$backup") == "$root_uid" && $(stat_value %a "$backup") == 600 && $(stat_value %h "$backup") == 1 ]] || fail caddyfile_legacy_state
+  validate_journal_identity "$journal" routing "$deployment" "$source" "$digest" "$release" "$previous" "$release_hash"
+  phase=$(record_value "$journal" phase); [[ $phase == restoring || $phase == rolled-back ]] || fail caddyfile_legacy_phase
+  before=$(record_value "$journal" before_sha); after=$(record_value "$journal" after_sha)
+  [[ $before == "$expected_caddy_sha" && $(sha256_file "$backup") == "$expected_caddy_sha" ]] || fail caddyfile_legacy_backup
+  require_hex "$after" 64 || fail caddyfile_legacy_state
+  current_sha=$(sha256_file "$caddyfile"); [[ $current_sha == "$before" || $current_sha == "$after" ]] || fail caddyfile_legacy_hash
+  chmod 0644 "$caddyfile"; fsync_path "$caddyfile"; validate_live_caddy "$caddyfile"
+}
 install_live_caddy(){
   if [[ $test_mode == 0 ]]; then install -o root -g root -m 0644 "$1" "$2"; else install -m 0644 "$1" "$2"; fi
 }
@@ -287,7 +303,7 @@ apply_routing(){
   validate_roots; record=$(record_path "$deployment"); validate_record "$record"; [[ $(record_value "$record" state) == prepared || $(record_value "$record" state) == routing-ready ]] || fail prepared_record
   source=$(record_value "$record" source); digest=$(record_value "$record" digest); release=$(record_value "$record" release); previous=$(record_value "$record" previous); release_hash=$(record_value "$record" release_sha)
   [[ -d $release && $(release_sha "$release") == "$release_hash" ]] || fail release_identity
-  validate_live_caddy "$caddyfile"; current_sha=$(sha256_file "$caddyfile")
+  normalize_legacy_live_caddy "$deployment" "$source" "$digest" "$release" "$previous" "$release_hash"; validate_live_caddy "$caddyfile"; current_sha=$(sha256_file "$caddyfile")
   if [[ $current_sha != "$expected_caddy_sha" && -e $routing_state ]]; then
     validate_private_file "$routing_state" 2 || fail caddy_sha
     state_baseline=$(record_value "$routing_state" baseline); state_sha=$(record_value "$routing_state" routed)
