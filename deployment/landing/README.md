@@ -57,6 +57,22 @@ release markers, public root login CTA, `/schools/`, `/auth`, and AVITO health.
 On failure it restores only the prior landing symlink; it never deletes a
 release or changes Auth/AVITO.
 
+Every mutating command writes and fsyncs a root-only intent journal before it
+changes a release, Caddyfile, deployment record, or current symlink. A retry of
+the same exact deployment id reconciles the recorded identities with the
+actual release content hash, Caddy hash, and symlink target, then resumes only
+an unambiguous operation. Any unrelated state fails closed and requires manual
+review; the operator never guesses which state to remove. Archive metadata is
+also checked before extraction: at most 500 regular/directory entries and at
+most 100 MiB of declared regular-file content, followed by a second extracted
+size check.
+
+Public post-checks do not follow or accept redirects. Root and `/schools/`
+must return exactly HTTP 200 with their release markers; the manifest and
+brand asset must return exactly 200; Auth must return 200 with its login
+heading; and AVITO health must return 200 with its documented `status: ok`
+response.
+
 ## Exact rollback
 
 Use the deployment id recorded by the successful deploy:

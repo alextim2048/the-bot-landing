@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import {createHash} from "node:crypto";
 import {execFileSync,spawnSync} from "node:child_process";
-import {chmodSync,mkdirSync,mkdtempSync,readFileSync,readlinkSync,realpathSync,symlinkSync,writeFileSync} from "node:fs";
+import {chmodSync,mkdirSync,mkdtempSync,readFileSync,readlinkSync,realpathSync,symlinkSync,truncateSync,writeFileSync} from "node:fs";
 import {tmpdir} from "node:os";
 import path from "node:path";
 import {fileURLToPath} from "node:url";
@@ -23,7 +23,7 @@ function hostileArchive(name,type="0"){
 }
 
 const operatorSource=readFileSync(operator,"utf8"),installer=readFileSync(path.join(here,"install-operator.sh"),"utf8"),sudoers=readFileSync(path.join(here,"sudoers-auth-deploy-landing"),"utf8");
-for(const token of ["SUDO_USER-} == auth-deploy","/var/www/the-bot-landing","/home/auth-deploy/uploads","f17b0bed053548f13e4e96f6c8e51d83e5d93f1eddcc404b26e4c0a9aab1615d","--quoting-style=escape -tvzf","archive_type","mv -Tf","flock -x","caddy validate","systemctl reload caddy","https://the-bot.ru/auth","https://avito.the-bot.ru/healthz","deploy_postcheck_rolled_back","caddy_routing_rolled_back"])assert.ok(operatorSource.includes(token),token);
+for(const token of ["SUDO_USER-} == auth-deploy","/var/www/the-bot-landing","/home/auth-deploy/uploads","f17b0bed053548f13e4e96f6c8e51d83e5d93f1eddcc404b26e4c0a9aab1615d","--quoting-style=escape -tvzf","archive_declared_size","write_journal","fsync_path","mv -Tf","flock -x","caddy validate","systemctl reload caddy","--write-out '%{http_code}'","id=\"auth-heading\">ВХОД</h1>","\"status\":\"ok\"","deploy_postcheck_rolled_back","caddy_routing_rolled_back"])assert.ok(operatorSource.includes(token),token);
 assert.match(sudoers,/^auth-deploy ALL=\(root\) NOPASSWD: \/usr\/local\/sbin\/deploy-the-bot-landing \*$/m);
 assert.match(installer,/sha256sum -c operator-checksums\.sha256/);assert.match(installer,/visudo -cf/);assert.match(installer,/trap 'rollback' ERR/);
 
@@ -35,21 +35,38 @@ const entries=execFileSync("tar",["-tzf",archiveA],{encoding:"utf8"});
 for(const required of ["site/index.html","site/schools/index.html","site/site.webmanifest","site/assets/brand/favicon.ico"])assert.match(entries,new RegExp(`^${required.replaceAll(".","\\.")}$`,"m"));
 assert.doesNotMatch(entries,/deployment|AGENTS|check-site\.mjs|\.governance/);
 
-const fixture=realpathSync(mkdtempSync(path.join(tmpdir(),"landing-operator-"))),www=path.join(fixture,"www"),uploads=path.join(fixture,"uploads"),state=path.join(fixture,"state"),mockbin=path.join(fixture,"bin");
-for(const directory of [www,path.join(www,"releases"),path.join(www,"deployments"),uploads,state,mockbin]){mkdirSync(directory,{recursive:true,mode:0o700});chmodSync(directory,0o700)}
-const previous=path.join(www,"releases","previous-release");mkdirSync(path.join(previous,"schools"),{recursive:true,mode:0o755});
-writeFileSync(path.join(previous,"index.html"),'<a href="https://the-bot.ru/auth">Войти</a>\n');writeFileSync(path.join(previous,"schools","index.html"),"Платформа для управления репетиторским центром\n");symlinkSync(previous,path.join(www,"current"));
 const caddy=`the-bot.ru {\n  @landing path / /index.html /privacy.html /terms.html /contacts.html /legal.css /release.html /logo.png /icon.png /problem-rules.png\n  handle @landing {\n    root * /var/www/the-bot-landing/current\n    file_server\n  }\n  reverse_proxy 127.0.0.1:3001\n}\n`;
-const caddyPath=path.join(fixture,"Caddyfile");writeFileSync(caddyPath,caddy,{mode:0o644});
-const copy=path.join(uploads,name);writeFileSync(copy,bodyA,{mode:0o600});chmodSync(copy,0o600);
-writeFileSync(path.join(mockbin,"sha256sum"),`#!/bin/sh\n/usr/bin/shasum -a 256 "$1"\n`,{mode:0o755});
-writeFileSync(path.join(mockbin,"caddy"),`#!/bin/sh\nprintf 'caddy %s\\n' "$*" >>"${fixture}/calls"\nexit "\${MOCK_CADDY_STATUS:-0}"\n`,{mode:0o755});
-writeFileSync(path.join(mockbin,"systemctl"),`#!/bin/sh\nprintf 'systemctl %s\\n' "$*" >>"${fixture}/calls"\nexit "\${MOCK_SYSTEMCTL_STATUS:-0}"\n`,{mode:0o755});
-writeFileSync(path.join(mockbin,"curl"),`#!/bin/sh\nurl=''; for value in "$@"; do url=$value; done\nprintf 'curl %s\\n' "$url" >>"${fixture}/calls"\nif [ "\${MOCK_PUBLIC_FAIL:-0}" = 1 ] && [ "$url" = 'https://the-bot.ru/' ]; then exit 22; fi\ncase "$url" in\n  https://the-bot.ru/) printf '<a href="https://the-bot.ru/auth">Войти</a>\\n';;\n  https://the-bot.ru/schools/) printf 'Платформа для управления репетиторским центром\\n';;\nesac\n`,{mode:0o755});
-writeFileSync(path.join(mockbin,"flock"),"#!/bin/sh\nexit 0\n",{mode:0o755});
-
-const harness=path.join(fixture,"harness.sh");
-writeFileSync(harness,`#!/usr/bin/env bash\nset -euo pipefail\nexport THE_BOT_LANDING_TEST_ROOT=${JSON.stringify(fixture)}\nexport THE_BOT_LANDING_TEST_CADDY_SHA=${sha(Buffer.from(caddy))}\nexport PATH=${JSON.stringify(`${mockbin}:${process.env.PATH}`)}\nsource ${JSON.stringify(operator)}\naction=$1; shift\ncase "$action" in prepare) prepare_release "$@";; routing) apply_routing "$@";; deploy) activate_release "$@";; rollback) rollback_release "$@";; esac\n`,{mode:0o755});
+function makeFixture(label,archiveBody=bodyA,chosenDeployment=deployment){
+  const fixture=realpathSync(mkdtempSync(path.join(tmpdir(),`landing-operator-${label}-`))),www=path.join(fixture,"www"),uploads=path.join(fixture,"uploads"),state=path.join(fixture,"state"),mockbin=path.join(fixture,"bin");
+  for(const directory of [www,path.join(www,"releases"),path.join(www,"deployments"),uploads,state,mockbin]){mkdirSync(directory,{recursive:true,mode:0o700});chmodSync(directory,0o700)}
+  const previous=path.join(www,"releases","previous-release");mkdirSync(path.join(previous,"schools"),{recursive:true,mode:0o755});
+  writeFileSync(path.join(previous,"index.html"),'<a href="https://the-bot.ru/auth">Войти</a>\n');writeFileSync(path.join(previous,"schools","index.html"),"Платформа для управления репетиторским центром\n");symlinkSync(previous,path.join(www,"current"));
+  const caddyPath=path.join(fixture,"Caddyfile");writeFileSync(caddyPath,caddy,{mode:0o644});
+  const archiveName=`the-bot-landing-${chosenDeployment}.tar.gz`,copy=path.join(uploads,archiveName);writeFileSync(copy,archiveBody,{mode:0o600});chmodSync(copy,0o600);
+  writeFileSync(path.join(mockbin,"sha256sum"),`#!/bin/sh\n/usr/bin/shasum -a 256 "$@"\n`,{mode:0o755});
+  writeFileSync(path.join(mockbin,"caddy"),`#!/bin/sh\nprintf 'caddy %s\\n' "$*" >>"${fixture}/calls"\nexit "\${MOCK_CADDY_STATUS:-0}"\n`,{mode:0o755});
+  writeFileSync(path.join(mockbin,"systemctl"),`#!/bin/sh\nprintf 'systemctl %s\\n' "$*" >>"${fixture}/calls"\nexit "\${MOCK_SYSTEMCTL_STATUS:-0}"\n`,{mode:0o755});
+  writeFileSync(path.join(mockbin,"curl"),`#!/bin/sh
+output=''; url=''; while [ "$#" -gt 0 ]; do case "$1" in --output) output=$2; shift 2;; --write-out) shift 2;; --*) shift;; *) url=$1; shift;; esac; done
+printf 'curl %s\\n' "$url" >>"${fixture}/calls"
+if [ "\${MOCK_PUBLIC_FAIL:-0}" = 1 ] && [ "$url" = 'https://the-bot.ru/' ]; then exit 22; fi
+status=200; [ "\${MOCK_REDIRECT_URL:-}" != "$url" ] || status=302
+case "$url" in
+  https://the-bot.ru/) body='<a href="https://the-bot.ru/auth">Войти</a>';;
+  https://the-bot.ru/schools/) body='Платформа для управления репетиторским центром';;
+  https://the-bot.ru/auth) body='<h1 id="auth-heading">ВХОД</h1>';;
+  https://avito.the-bot.ru/healthz) body='{"status":"ok","mode":"read-only"}' ;;
+  *) body='asset';;
+esac
+printf '%s' "$body" >"$output"; printf '%s' "$status"
+`,{mode:0o755});
+  writeFileSync(path.join(mockbin,"flock"),"#!/bin/sh\nexit 0\n",{mode:0o755});
+  const harness=path.join(fixture,"harness.sh");
+  writeFileSync(harness,`#!/usr/bin/env bash\nset -euo pipefail\nexport THE_BOT_LANDING_TEST_ROOT=${JSON.stringify(fixture)}\nexport THE_BOT_LANDING_TEST_CADDY_SHA=${sha(Buffer.from(caddy))}\nexport PATH=${JSON.stringify(`${mockbin}:${process.env.PATH}`)}\nsource ${JSON.stringify(operator)}\naction=$1; shift\ncase "$action" in prepare) prepare_release "$@";; routing) apply_routing "$@";; deploy) activate_release "$@";; rollback) rollback_release "$@";; check) public_full_check;; esac\n`,{mode:0o755});
+  return {fixture,www,uploads,state,previous,caddyPath,copy,harness,deployment:chosenDeployment,digest:sha(archiveBody)};
+}
+const act=(f,action,args=[],env={})=>run("bash",[f.harness,action,...args],{env:{...process.env,...env}});
+const fixtureData=makeFixture("main"),{fixture,www,uploads,state,previous,caddyPath,copy,harness}=fixtureData;
 let result=run("bash",[harness,"prepare",copy,source,sha(bodyA),deployment]);assert.equal(result.status,0,result.stderr);assert.match(result.stdout,/LANDING_RELEASE_PREPARED/);
 const record=path.join(www,"deployments",`${deployment}.record`);assert.match(readFileSync(record,"utf8"),/state=prepared/);
 result=run("bash",[harness,"routing",deployment],{env:{...process.env,MOCK_PUBLIC_FAIL:"1"}});assert.notEqual(result.status,0);assert.equal(readFileSync(caddyPath,"utf8"),caddy,"failed routing must restore exact Caddy bytes");assert.match(readFileSync(record,"utf8"),/state=prepared/);
@@ -66,4 +83,37 @@ for(const [suffix,body,error] of [["02",hostileArchive("site/../escape"),/archiv
 }
 const unsafeDeployment=deployment.replace(/01$/,"04"),unsafePath=path.join(uploads,`the-bot-landing-${unsafeDeployment}.tar.gz`);writeFileSync(unsafePath,bodyA,{mode:0o644});chmodSync(unsafePath,0o644);
 const unsafe=run("bash",[harness,"prepare",unsafePath,source,sha(bodyA),unsafeDeployment]);assert.notEqual(unsafe.status,0);assert.match(unsafe.stderr,/upload_metadata/);
+
+for(const url of ["https://the-bot.ru/","https://the-bot.ru/schools/","https://the-bot.ru/site.webmanifest","https://the-bot.ru/assets/brand/favicon.ico","https://the-bot.ru/auth","https://avito.the-bot.ru/healthz"]){
+  const redirected=act(fixtureData,"check",[],{MOCK_REDIRECT_URL:url});assert.notEqual(redirected.status,0,`redirect must fail: ${url}`);assert.match(redirected.stderr,/http_status:302/);
+}
+
+let scenario=20;
+const nextId=()=>`landing-${source}-20260918${String(200000+scenario++).padStart(6,"0")}`;
+const prepareFixture=f=>act(f,"prepare",[f.copy,source,f.digest,f.deployment]);
+for(const phase of ["prepare_after_freeze","prepare_before_release_move","prepare_after_release_move","prepare_before_record","prepare_after_record"]){
+  const f=makeFixture(phase,bodyA,nextId()),interrupted=act(f,"prepare",[f.copy,source,f.digest,f.deployment],{THE_BOT_LANDING_FAIL_AT:phase});
+  assert.notEqual(interrupted.status,0,phase);assert.match(interrupted.stderr,new RegExp(`injected:${phase}`));
+  const retry=prepareFixture(f);assert.equal(retry.status,0,retry.stderr);assert.match(readFileSync(path.join(f.state,`prepare-${f.deployment}.journal`),"utf8"),/phase=done/);
+}
+for(const phase of ["routing_before_backup","routing_after_backup","routing_before_candidate","routing_after_candidate","routing_before_caddy","routing_after_caddy","routing_before_reload","routing_after_reload","routing_before_state","routing_after_state","routing_after_record"]){
+  const f=makeFixture(phase,bodyA,nextId());assert.equal(prepareFixture(f).status,0);
+  const interrupted=act(f,"routing",[f.deployment],{THE_BOT_LANDING_FAIL_AT:phase});assert.notEqual(interrupted.status,0,phase);
+  const retry=act(f,"routing",[f.deployment]);assert.equal(retry.status,0,retry.stderr);assert.match(readFileSync(path.join(f.state,`routing-${f.deployment}.journal`),"utf8"),/phase=done/);
+}
+for(const phase of ["deploy_before_symlink","deploy_after_symlink","deploy_before_record","deploy_after_record"]){
+  const f=makeFixture(phase,bodyA,nextId());assert.equal(prepareFixture(f).status,0);assert.equal(act(f,"routing",[f.deployment]).status,0);
+  const interrupted=act(f,"deploy",[f.deployment],{THE_BOT_LANDING_FAIL_AT:phase});assert.notEqual(interrupted.status,0,phase);
+  const retry=act(f,"deploy",[f.deployment]);assert.equal(retry.status,0,retry.stderr);assert.equal(readlinkSync(path.join(f.www,"current")),path.join(f.www,"releases",f.deployment));assert.match(readFileSync(path.join(f.state,`deploy-${f.deployment}.journal`),"utf8"),/phase=done/);
+}
+for(const phase of ["rollback_before_symlink","rollback_after_symlink","rollback_before_record","rollback_after_record"]){
+  const f=makeFixture(phase,bodyA,nextId());assert.equal(prepareFixture(f).status,0);assert.equal(act(f,"routing",[f.deployment]).status,0);assert.equal(act(f,"deploy",[f.deployment]).status,0);
+  const interrupted=act(f,"rollback",[f.deployment],{THE_BOT_LANDING_FAIL_AT:phase});assert.notEqual(interrupted.status,0,phase);
+  const retry=act(f,"rollback",[f.deployment]);assert.equal(retry.status,0,retry.stderr);assert.equal(readlinkSync(path.join(f.www,"current")),f.previous);assert.match(readFileSync(path.join(f.state,`rollback-${f.deployment}.journal`),"utf8"),/phase=done/);
+}
+
+const bombSource=realpathSync(mkdtempSync(path.join(tmpdir(),"landing-bomb-source-"))),bombSite=path.join(bombSource,"site");mkdirSync(path.join(bombSite,"schools"),{recursive:true});
+writeFileSync(path.join(bombSite,"index.html"),'<a href="https://the-bot.ru/auth">Войти</a>');writeFileSync(path.join(bombSite,"schools","index.html"),"Платформа для управления репетиторским центром");const huge=path.join(bombSite,"huge.bin");writeFileSync(huge,"");truncateSync(huge,104857601);
+const bombTar=path.join(bombSource,"bomb.tar.gz");execFileSync("tar",["-czf",bombTar,"site"],{cwd:bombSource});const bombBody=readFileSync(bombTar),bomb=makeFixture("bomb",bombBody,nextId());
+const bombResult=prepareFixture(bomb);assert.notEqual(bombResult.status,0);assert.match(bombResult.stderr,/archive_declared_size/);assert.equal(readFileSync(bomb.copy).byteLength,bombBody.byteLength);assert.equal(run("find",[bomb.www,"-maxdepth","1","-name",".prepare-*","-print"]).stdout,"","oversize archive must be rejected before extraction");
 console.log("PASS: deterministic landing package and guarded operator fixtures");
