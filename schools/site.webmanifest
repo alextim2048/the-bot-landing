@@ -1,0 +1,35 @@
+{
+  "name": "THE БОТ Platform",
+  "short_name": "THE БОТ",
+  "start_url": "/schools/",
+  "scope": "/schools/",
+  "display": "standalone",
+  "background_color": "#f7f6ff",
+  "theme_color": "#6155f5",
+  "icons": [
+    {
+      "src": "/assets/brand/pwa-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/assets/brand/pwa-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/assets/brand/pwa-maskable-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/assets/brand/pwa-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
