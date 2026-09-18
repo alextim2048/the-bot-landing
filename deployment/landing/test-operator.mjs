@@ -43,7 +43,7 @@ function hostileArchive(name,type="0"){
 
 try {
 const operatorSource=readFileSync(operator,"utf8"),installer=readFileSync(path.join(here,"install-operator.sh"),"utf8"),sudoers=readFileSync(path.join(here,"sudoers-auth-deploy-landing"),"utf8");
-for(const token of ["SUDO_USER-} == auth-deploy","/var/www/the-bot-landing","/home/auth-deploy/uploads","f17b0bed053548f13e4e96f6c8e51d83e5d93f1eddcc404b26e4c0a9aab1615d","--quoting-style=escape -tvzf","archive_declared_size","write_journal","fsync_path","mv -Tf","flock -x","caddy validate","systemctl reload caddy","--write-out '%{http_code}'","id=\"auth-heading\">ВХОД</h1>","\"status\":\"ok\"","deploy_postcheck_rolled_back","caddy_routing_rolled_back"])assert.ok(operatorSource.includes(token),token);
+for(const token of ["SUDO_USER-} == auth-deploy","/var/www/the-bot-landing","/home/auth-deploy/uploads","f17b0bed053548f13e4e96f6c8e51d83e5d93f1eddcc404b26e4c0a9aab1615d","--quoting-style=escape -tvzf","archive_declared_size","write_journal","fsync_path","mv -Tf","flock -x","--adapter caddyfile","systemctl reload caddy","--write-out '%{http_code}'","id=\"auth-heading\">ВХОД</h1>","\"status\":\"ok\"","deploy_postcheck_rolled_back","caddy_routing_rolled_back"])assert.ok(operatorSource.includes(token),token);
 assert.match(sudoers,/^auth-deploy ALL=\(root\) NOPASSWD: \/usr\/local\/sbin\/deploy-the-bot-landing \*$/m);
 assert.match(installer,/sha256sum -c operator-checksums\.sha256/);assert.match(installer,/visudo -cf/);assert.match(installer,/trap 'rollback' ERR/);
 
@@ -66,7 +66,11 @@ function makeFixture(label,archiveBody=bodyA,chosenDeployment=deployment){
   const caddyPath=path.join(fixture,"Caddyfile");writeFileSync(caddyPath,caddy,{mode:0o644});
   const archiveName=`the-bot-landing-${chosenDeployment}.tar.gz`,copy=path.join(uploads,archiveName);writeFileSync(copy,archiveBody,{mode:0o600});chmodSync(copy,0o600);
   writeFileSync(path.join(mockbin,"sha256sum"),`#!/bin/sh\n/usr/bin/shasum -a 256 "$@"\n`,{mode:0o755});
-  writeFileSync(path.join(mockbin,"caddy"),`#!/bin/sh\nprintf 'caddy %s\\n' "$*" >>"${fixture}/calls"\nexit "\${MOCK_CADDY_STATUS:-0}"\n`,{mode:0o755});
+  writeFileSync(path.join(mockbin,"caddy"),`#!/bin/sh
+printf 'caddy %s\\n' "$*" >>"${fixture}/calls"
+if [ "$1" = validate ]; then [ "$4" = --adapter ] && [ "$5" = caddyfile ] || exit 64; fi
+exit "\${MOCK_CADDY_STATUS:-0}"
+`,{mode:0o755});
   writeFileSync(path.join(mockbin,"systemctl"),`#!/bin/sh\nprintf 'systemctl %s\\n' "$*" >>"${fixture}/calls"\nexit "\${MOCK_SYSTEMCTL_STATUS:-0}"\n`,{mode:0o755});
   writeFileSync(path.join(mockbin,"curl"),`#!/bin/sh
 output=''; url=''; while [ "$#" -gt 0 ]; do case "$1" in --output) output=$2; shift 2;; --write-out) shift 2;; --*) shift;; *) url=$1; shift;; esac; done
@@ -92,6 +96,7 @@ const fixtureData=makeFixture("main"),{fixture,www,uploads,state,previous,caddyP
 let result=run("bash",[harness,"prepare",copy,source,sha(bodyA),deployment]);assert.equal(result.status,0,result.stderr);assert.match(result.stdout,/LANDING_RELEASE_PREPARED/);
 const record=path.join(www,"deployments",`${deployment}.record`);assert.match(readFileSync(record,"utf8"),/state=prepared/);
 result=run("bash",[harness,"routing",deployment],{env:{...process.env,MOCK_PUBLIC_FAIL:"1"}});assert.notEqual(result.status,0);assert.equal(readFileSync(caddyPath,"utf8"),caddy,"failed routing must restore exact Caddy bytes");assert.match(readFileSync(record,"utf8"),/state=prepared/);
+const failedRoutingCalls=readFileSync(path.join(fixture,"calls"),"utf8");assert.equal(failedRoutingCalls.split(`caddy validate --config ${path.join(state,`caddy-${deployment}.candidate`)} --adapter caddyfile`).length-1,1,"candidate validation must name the Caddyfile adapter");assert.equal(failedRoutingCalls.split(`caddy validate --config ${caddyPath} --adapter caddyfile`).length-1,2,"current and restored Caddyfile validation must name the adapter");
 result=run("bash",[harness,"routing",deployment]);assert.equal(result.status,0,result.stderr);
 const routedCaddy=readFileSync(caddyPath,"utf8");assert.match(routedCaddy,/\/site\.webmanifest \/assets\/brand\/\* \/schools \/schools\/\*/);assert.equal(routedCaddy.split("/site.webmanifest /assets/brand/* /schools /schools/*").length-1,1);assert.ok(routedCaddy.endsWith(unrelatedSite),"routing must preserve the unrelated site block byte-for-byte");assert.match(readFileSync(record,"utf8"),/state=routing-ready/);
 result=run("bash",[harness,"deploy",deployment]);assert.equal(result.status,0,result.stderr);assert.equal(readlinkSync(path.join(www,"current")),path.join(www,"releases",deployment));assert.match(readFileSync(record,"utf8"),/state=active/);

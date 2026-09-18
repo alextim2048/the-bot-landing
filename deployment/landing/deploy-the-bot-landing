@@ -270,7 +270,7 @@ render_caddy(){
 restore_caddy(){
   local backup=$1 temporary="${caddyfile}.restore-$$"
   cp -p "$backup" "$temporary"; fsync_path "$temporary"; mv -f "$temporary" "$caddyfile"; fsync_path "$(dirname "$caddyfile")"
-  caddy validate --config "$caddyfile" >/dev/null && systemctl reload caddy
+  caddy validate --config "$caddyfile" --adapter caddyfile >/dev/null && systemctl reload caddy
 }
 apply_routing(){
   local deployment=$1 record backup candidate current_sha routed_sha state_sha state_baseline state_tmp journal source digest release previous release_hash temporary routing_failure=0
@@ -303,7 +303,7 @@ apply_routing(){
   fi
   checkpoint routing_after_backup
   validate_caddy_shape "$backup"; candidate="$state_root/caddy-${deployment}.candidate"; checkpoint routing_before_candidate; render_caddy "$backup" "$candidate"; checkpoint routing_after_candidate
-  caddy validate --config "$candidate" >/dev/null || fail caddy_candidate
+  caddy validate --config "$candidate" --adapter caddyfile >/dev/null || fail caddy_candidate
   routed_sha=$(sha256_file "$candidate")
   validate_journal_identity "$journal" routing "$deployment" "$source" "$digest" "$release" "$previous" "$release_hash"
   [[ $(record_value "$journal" before_sha) == "$expected_caddy_sha" && ( $(record_value "$journal" after_sha) == PENDING || $(record_value "$journal" after_sha) == "$routed_sha" ) ]] || fail routing_journal_mismatch
@@ -317,7 +317,7 @@ apply_routing(){
   fi
   write_journal "$journal" routing caddy-installed "$deployment" "$source" "$digest" "$release" "$previous" "$expected_caddy_sha" "$routed_sha" "$release_hash"
   checkpoint routing_before_reload
-  if ! caddy validate --config "$caddyfile" >/dev/null || ! systemctl reload caddy; then routing_failure=1; fi
+  if ! caddy validate --config "$caddyfile" --adapter caddyfile >/dev/null || ! systemctl reload caddy; then routing_failure=1; fi
   checkpoint routing_after_reload
   if ((routing_failure==0)) && { ! public_root_check || ! service_checks; }; then routing_failure=1; fi
   if ((routing_failure)); then
