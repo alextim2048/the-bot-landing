@@ -42,10 +42,11 @@ function hostileArchive(name,type="0"){
 }
 
 try {
-const operatorSource=readFileSync(operator,"utf8"),installer=readFileSync(path.join(here,"install-operator.sh"),"utf8"),sudoers=readFileSync(path.join(here,"sudoers-auth-deploy-landing"),"utf8");
-for(const token of ["SUDO_USER-} == auth-deploy","/var/www/the-bot-landing","/home/auth-deploy/uploads","f17b0bed053548f13e4e96f6c8e51d83e5d93f1eddcc404b26e4c0a9aab1615d","--quoting-style=escape -tvzf","archive_declared_size","write_journal","fsync_path","mv -Tf","flock -x","--adapter caddyfile","install -o root -g root -m 0644","public_root_reachable","systemctl reload caddy","--write-out '%{http_code}'","id=\"auth-heading\">ВХОД</h1>","\"status\":\"ok\"","deploy_postcheck_rolled_back","caddy_routing_rolled_back"])assert.ok(operatorSource.includes(token),token);
+const operatorSource=readFileSync(operator,"utf8"),installer=readFileSync(path.join(here,"install-operator.sh"),"utf8"),sudoers=readFileSync(path.join(here,"sudoers-auth-deploy-landing"),"utf8"),checksums=readFileSync(path.join(here,"operator-checksums.sha256"),"utf8");
+for(const token of ["SUDO_USER-} == auth-deploy","/var/www/the-bot-landing","/home/auth-deploy/uploads","f17b0bed053548f13e4e96f6c8e51d83e5d93f1eddcc404b26e4c0a9aab1615d","60b10991eb32235fc9b462c4d7aadd923b795ad3df774b476ca8a1389594df9a","landing-c3abfb3ee76616c9c85313aa958dd5b88a6592a8-20260918100401","--quoting-style=escape -tvzf","archive_declared_size","write_journal","fsync_path","mv -Tf","flock -x","--adapter caddyfile","install -o root -g root -m 0644","public_root_reachable","systemctl reload caddy","--write-out '%{http_code}'","id=\"auth-heading\">ВХОД</h1>","\"status\":\"ok\"","deploy_postcheck_rolled_back","caddy_routing_rolled_back","LANDING_HTML_POLICY_READY","no-store, max-age=0"])assert.ok(operatorSource.includes(token),token);
 assert.match(sudoers,/^auth-deploy ALL=\(root\) NOPASSWD: \/usr\/local\/sbin\/deploy-the-bot-landing \*$/m);
 assert.match(installer,/sha256sum -c operator-checksums\.sha256/);assert.match(installer,/visudo -cf/);assert.match(installer,/trap 'rollback' ERR/);
+assert.equal(checksums,`${sha(Buffer.from(operatorSource))}  deploy-the-bot-landing\n${sha(Buffer.from(sudoers))}  sudoers-auth-deploy-landing\n${sha(Buffer.from(installer))}  install-operator.sh\n`);
 
 const buildA=temporaryDirectory("landing-package-a-"),buildB=temporaryDirectory("landing-package-b-");
 if(process.env.THE_BOT_LANDING_CLEANUP_ASSERTION_PROBE==="1")assert.fail("cleanup assertion probe");
@@ -58,6 +59,7 @@ assert.doesNotMatch(entries,/deployment|AGENTS|check-site\.mjs|\.governance/);
 
 const unrelatedSite=`other.the-bot.ru {\n  @other path / /privacy.html /legal.css\n  handle @other {\n    root * /srv/other-site\n    file_server\n  }\n  reverse_proxy 127.0.0.1:3001\n}\n`;
 const caddy=`the-bot.ru {\n  @landing path / /index.html /privacy.html /terms.html /contacts.html /legal.css /release.html /logo.png /icon.png /problem-rules.png\n  handle @landing {\n    root * /var/www/the-bot-landing/current\n    file_server\n  }\n  reverse_proxy 127.0.0.1:3001\n}\n${unrelatedSite}`;
+const routedFixtureCaddy=caddy.replace(" /problem-rules.png"," /problem-rules.png /site.webmanifest /assets/brand/* /schools /schools/*");
 function makeFixture(label,archiveBody=bodyA,chosenDeployment=deployment){
   const fixture=temporaryDirectory(`landing-operator-${label}-`),www=path.join(fixture,"www"),uploads=path.join(fixture,"uploads"),state=path.join(fixture,"state"),mockbin=path.join(fixture,"bin");
   for(const directory of [www,path.join(www,"releases"),path.join(www,"deployments"),uploads,state,mockbin]){mkdirSync(directory,{recursive:true,mode:0o700});chmodSync(directory,0o700)}
@@ -73,22 +75,30 @@ exit "\${MOCK_CADDY_STATUS:-0}"
 `,{mode:0o755});
   writeFileSync(path.join(mockbin,"systemctl"),`#!/bin/sh\nprintf 'systemctl %s\\n' "$*" >>"${fixture}/calls"\nexit "\${MOCK_SYSTEMCTL_STATUS:-0}"\n`,{mode:0o755});
   writeFileSync(path.join(mockbin,"curl"),`#!/bin/sh
-output=''; url=''; while [ "$#" -gt 0 ]; do case "$1" in --output) output=$2; shift 2;; --write-out) shift 2;; --*) shift;; *) url=$1; shift;; esac; done
+output=''; headers=''; url=''; while [ "$#" -gt 0 ]; do case "$1" in --output) output=$2; shift 2;; --dump-header) headers=$2; shift 2;; --write-out) shift 2;; --*) shift;; *) url=$1; shift;; esac; done
 printf 'curl %s\\n' "$url" >>"${fixture}/calls"
 if [ "\${MOCK_PUBLIC_FAIL:-0}" = 1 ] && [ "$url" = 'https://the-bot.ru/' ] && [ ! -e ${JSON.stringify(path.join(fixture,"public-failed-once"))} ]; then : >${JSON.stringify(path.join(fixture,"public-failed-once"))}; exit 22; fi
 status=200; [ "\${MOCK_REDIRECT_URL:-}" != "$url" ] || status=302
 case "$url" in
   https://the-bot.ru/) if [ "\${MOCK_FORCE_RELEASE_MARKER:-0}" = 1 ] || [ "$(readlink ${JSON.stringify(path.join(www,"current"))})" != ${JSON.stringify(previous)} ]; then body='<a href="https://the-bot.ru/auth">Войти</a>'; else body='legacy landing without release marker'; fi;;
+  https://the-bot.ru/index.html) body='<a href="https://the-bot.ru/auth">Войти</a>';;
+  https://the-bot.ru/release.html) if grep -q '@legacy_release path /release.html' ${JSON.stringify(caddyPath)}; then status=308; location='/'; body=''; else body='legacy release'; fi;;
   https://the-bot.ru/schools/) body='Платформа для управления репетиторским центром';;
   https://the-bot.ru/auth) body='<h1 id="auth-heading">ВХОД</h1>';;
   https://avito.the-bot.ru/healthz) body='{"status":"ok","mode":"read-only"}' ;;
   *) body='asset';;
 esac
+if [ -n "$headers" ]; then
+  printf 'HTTP/2 %s\\r\\n' "$status" >"$headers"
+  if { [ "$url" = 'https://the-bot.ru/' ] || [ "$url" = 'https://the-bot.ru/index.html' ]; } && grep -q 'header @landing_html Cache-Control "no-store, max-age=0"' ${JSON.stringify(caddyPath)} && [ "\${MOCK_POLICY_FAIL:-0}" != 1 ]; then printf 'Cache-Control: no-store, max-age=0\\r\\n' >>"$headers"; fi
+  [ -z "\${location:-}" ] || printf 'Location: %s\\r\\n' "$location" >>"$headers"
+  printf '\\r\\n' >>"$headers"
+fi
 printf '%s' "$body" >"$output"; printf '%s' "$status"
 `,{mode:0o755});
   writeFileSync(path.join(mockbin,"flock"),"#!/bin/sh\nexit 0\n",{mode:0o755});
   const harness=path.join(fixture,"harness.sh");
-  writeFileSync(harness,`#!/usr/bin/env bash\nset -euo pipefail\nexport THE_BOT_LANDING_TEST_ROOT=${JSON.stringify(fixture)}\nexport THE_BOT_LANDING_TEST_CADDY_SHA=${sha(Buffer.from(caddy))}\nexport PATH=${JSON.stringify(`${mockbin}:${process.env.PATH}`)}\nsource ${JSON.stringify(operator)}\naction=$1; shift\ncase "$action" in prepare) prepare_release "$@";; routing) apply_routing "$@";; deploy) activate_release "$@";; rollback) rollback_release "$@";; check) public_full_check;; esac\n`,{mode:0o755});
+  writeFileSync(harness,`#!/usr/bin/env bash\nset -euo pipefail\nexport THE_BOT_LANDING_TEST_ROOT=${JSON.stringify(fixture)}\nexport THE_BOT_LANDING_TEST_CADDY_SHA=${sha(Buffer.from(caddy))}\nexport THE_BOT_LANDING_TEST_POLICY_DEPLOYMENT=${JSON.stringify(chosenDeployment)}\nexport THE_BOT_LANDING_TEST_POLICY_SOURCE=${JSON.stringify(source)}\nexport THE_BOT_LANDING_TEST_POLICY_CADDY_SHA=${sha(Buffer.from(routedFixtureCaddy))}\nexport PATH=${JSON.stringify(`${mockbin}:${process.env.PATH}`)}\nsource ${JSON.stringify(operator)}\naction=$1; shift\ncase "$action" in prepare) prepare_release "$@";; routing) apply_routing "$@";; html-policy) apply_html_policy "$@";; deploy) activate_release "$@";; rollback) rollback_release "$@";; check) public_full_check;; esac\n`,{mode:0o755});
   return {fixture,www,uploads,state,previous,caddyPath,copy,harness,deployment:chosenDeployment,digest:sha(archiveBody)};
 }
 const act=(f,action,args=[],env={})=>run("bash",[f.harness,action,...args],{env:{...process.env,...env}});
@@ -114,6 +124,53 @@ const unsafe=run("bash",[harness,"prepare",unsafePath,source,sha(bodyA),unsafeDe
 
 for(const url of ["https://the-bot.ru/","https://the-bot.ru/schools/","https://the-bot.ru/site.webmanifest","https://the-bot.ru/assets/brand/favicon.ico","https://the-bot.ru/auth","https://avito.the-bot.ru/healthz"]){
   const redirected=act(fixtureData,"check",[],{MOCK_REDIRECT_URL:url,MOCK_FORCE_RELEASE_MARKER:"1"});assert.notEqual(redirected.status,0,`redirect must fail: ${url}`);assert.match(redirected.stderr,/http_status:302/);
+}
+
+const activateFixture=f=>{
+  assert.equal(act(f,"prepare",[f.copy,source,f.digest,f.deployment]).status,0);
+  assert.equal(act(f,"routing",[f.deployment]).status,0);
+  assert.equal(act(f,"deploy",[f.deployment]).status,0);
+};
+const policy=makeFixture("html-policy",bodyA,deployment);activateFixture(policy);
+const policyBefore=readFileSync(policy.caddyPath,"utf8"),policyCurrentBefore=readlinkSync(path.join(policy.www,"current"));
+const reloadsBefore=(readFileSync(path.join(policy.fixture,"calls"),"utf8").match(/systemctl reload caddy/g)||[]).length;
+result=act(policy,"html-policy",[policy.deployment]);assert.equal(result.status,0,result.stderr);assert.match(result.stdout,/LANDING_HTML_POLICY_READY/);
+const policyAfter=readFileSync(policy.caddyPath,"utf8"),policyCalls=readFileSync(path.join(policy.fixture,"calls"),"utf8");
+assert.equal(readlinkSync(path.join(policy.www,"current")),policyCurrentBefore,"HTML policy must not switch the release symlink");
+assert.equal(lstatSync(policy.caddyPath).mode&0o777,0o644);assert.ok(policyAfter.endsWith(unrelatedSite),"unrelated site block must remain byte-identical");
+assert.equal(policyAfter.split("@legacy_release path /release.html").length-1,1);assert.equal(policyAfter.split("redir @legacy_release / 308").length-1,1);
+assert.equal(policyAfter.split("@landing_html path / /index.html").length-1,1);assert.equal(policyAfter.split('header @landing_html Cache-Control "no-store, max-age=0"').length-1,1);
+assert.equal((policyCalls.match(/systemctl reload caddy/g)||[]).length,reloadsBefore+1,"policy transition reloads Caddy exactly once");
+assert.match(policyCalls,/curl https:\/\/the-bot\.ru\/index\.html/);assert.match(policyCalls,/curl https:\/\/the-bot\.ru\/release\.html/);
+assert.match(policyCalls,new RegExp(`caddy validate --config ${path.join(policy.state,`caddy-${policy.deployment}.html-policy.candidate`).replaceAll("/","\\/")} --adapter caddyfile`));
+assert.match(readFileSync(path.join(policy.state,"html-policy-v1.record"),"utf8"),new RegExp(`before=${sha(Buffer.from(policyBefore))}\\nafter=${sha(Buffer.from(policyAfter))}`));
+const reuseReloads=(policyCalls.match(/systemctl reload caddy/g)||[]).length;
+result=act(policy,"html-policy",[policy.deployment]);assert.equal(result.status,0,result.stderr);assert.match(result.stdout,/LANDING_HTML_POLICY_REUSED/);
+assert.equal((readFileSync(path.join(policy.fixture,"calls"),"utf8").match(/systemctl reload caddy/g)||[]).length,reuseReloads,"verified reuse must not reload Caddy");
+const futureDeployment=deployment.replace(/01$/,"09"),futureArchive=path.join(policy.uploads,`the-bot-landing-${futureDeployment}.tar.gz`);writeFileSync(futureArchive,bodyA,{mode:0o600});chmodSync(futureArchive,0o600);
+result=act(policy,"prepare",[futureArchive,source,sha(bodyA),futureDeployment]);assert.equal(result.status,0,result.stderr);
+result=act(policy,"routing",[futureDeployment]);assert.equal(result.status,0,result.stderr);assert.match(result.stdout,/LANDING_ROUTING_REUSED/);
+assert.equal(readFileSync(policy.caddyPath,"utf8"),policyAfter,"later release routing must preserve the verified HTML policy Caddyfile");
+
+const policyRollback=makeFixture("html-policy-rollback",bodyA,deployment);activateFixture(policyRollback);
+const rollbackBytes=readFileSync(policyRollback.caddyPath),rollbackCurrent=readlinkSync(path.join(policyRollback.www,"current"));
+result=act(policyRollback,"html-policy",[policyRollback.deployment],{MOCK_POLICY_FAIL:"1"});assert.notEqual(result.status,0);assert.match(result.stderr,/html_policy_rolled_back/);
+assert.deepEqual(readFileSync(policyRollback.caddyPath),rollbackBytes,"failed policy transition must restore exact Caddy bytes");
+assert.equal(lstatSync(policyRollback.caddyPath).mode&0o777,0o644,"policy restore must leave live Caddyfile readable");
+assert.equal(readlinkSync(path.join(policyRollback.www,"current")),rollbackCurrent,"policy rollback must not switch the release symlink");
+assert.match(readFileSync(path.join(policyRollback.www,"deployments",`${policyRollback.deployment}.record`),"utf8"),/state=active/);
+
+const policyDrift=makeFixture("html-policy-drift",bodyA,deployment);activateFixture(policyDrift);writeFileSync(policyDrift.caddyPath,`${readFileSync(policyDrift.caddyPath,"utf8")}# drift\n`,{mode:0o644});chmodSync(policyDrift.caddyPath,0o644);
+result=act(policyDrift,"html-policy",[policyDrift.deployment]);assert.notEqual(result.status,0);assert.match(result.stderr,/html_policy_unjournaled_change/);
+result=act(policyDrift,"html-policy",[policyDrift.deployment.replace(/01$/,"02")]);assert.notEqual(result.status,0);assert.match(result.stderr,/html_policy_deployment/);
+for(const phase of ["html_policy_after_caddy","html_policy_before_state"]){
+  const interruptedPolicy=makeFixture(phase,bodyA,deployment);activateFixture(interruptedPolicy);
+  result=act(interruptedPolicy,"html-policy",[interruptedPolicy.deployment],{THE_BOT_LANDING_FAIL_AT:phase});assert.notEqual(result.status,0);assert.match(result.stderr,new RegExp(`injected:${phase}`));
+  const callsBeforeRetry=readFileSync(path.join(interruptedPolicy.fixture,"calls"),"utf8"),reloadsBeforeRetry=(callsBeforeRetry.match(/systemctl reload caddy/g)||[]).length;
+  result=act(interruptedPolicy,"html-policy",[interruptedPolicy.deployment]);assert.equal(result.status,0,result.stderr);assert.match(result.stdout,/LANDING_HTML_POLICY_READY/);
+  const reloadsAfterRetry=(readFileSync(path.join(interruptedPolicy.fixture,"calls"),"utf8").match(/systemctl reload caddy/g)||[]).length;
+  assert.equal(reloadsAfterRetry,phase==="html_policy_before_state"?reloadsBeforeRetry:reloadsBeforeRetry+1,"same-ID reconciliation must not repeat a completed reload");
+  assert.match(readFileSync(path.join(interruptedPolicy.state,`html-policy-${interruptedPolicy.deployment}.journal`),"utf8"),/phase=done/);
 }
 
 let scenario=20;

@@ -52,6 +52,28 @@ Later releases still require the explicit `routing` command, but it performs a
 read-only reuse check against the root-only recorded routed hash and does not
 reload Caddy again.
 
+## Current landing HTML policy
+
+The separately authorized, one-purpose transition for the current deployed
+landing is:
+
+```sh
+sudo /usr/local/sbin/deploy-the-bot-landing html-policy \
+  landing-c3abfb3ee76616c9c85313aa958dd5b88a6592a8-20260918100401
+```
+
+`html-policy` accepts only that deployment, source
+`c3abfb3ee76616c9c85313aa958dd5b88a6592a8`, and the reviewed routed Caddyfile
+SHA `60b10991eb32235fc9b462c4d7aadd923b795ad3df774b476ca8a1389594df9a`.
+It adds an exact `308` redirect from `/release.html` to `/` and adds
+`Cache-Control: no-store, max-age=0` only to `/` and `/index.html`. It does not
+change the landing release symlink. The transition keeps a root-only byte-exact
+backup and journal, validates the candidate with the Caddyfile adapter, reloads
+Caddy once, and automatically restores the prior bytes as root:root `0644` if
+validation, reload, root policy, Auth, or AVITO checks fail. A completed state
+is reusable without another reload, and later landing routing recognizes the
+recorded policy state.
+
 `deploy` switches only `/var/www/the-bot-landing/current`. It verifies the
 release markers, public root login CTA, `/schools/`, `/auth`, and AVITO health.
 On failure it restores only the prior landing symlink; it never deletes a
