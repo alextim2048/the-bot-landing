@@ -1,0 +1,2 @@
+# Installed as /etc/sudoers.d/the-bot-landing by install-operator.sh.
+auth-deploy ALL=(root) NOPASSWD: /usr/local/sbin/deploy-the-bot-landing *

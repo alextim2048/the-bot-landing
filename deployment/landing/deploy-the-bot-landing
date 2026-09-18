@@ -1,0 +1,229 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly contract='LANDING_SERVER_OPERATOR_CONTRACT version=1 activation=atomic routing=explicit rollback=guarded'
+readonly production_root='/var/www/the-bot-landing'
+readonly production_upload='/home/auth-deploy/uploads'
+readonly production_state='/var/lib/the-bot-landing'
+readonly production_caddy='/etc/caddy/Caddyfile'
+readonly baseline_caddy_sha='f17b0bed053548f13e4e96f6c8e51d83e5d93f1eddcc404b26e4c0a9aab1615d'
+
+if [[ ${BASH_SOURCE[0]} != "$0" && -n ${THE_BOT_LANDING_TEST_ROOT-} ]]; then
+  landing_root="$THE_BOT_LANDING_TEST_ROOT/www"; upload_root="$THE_BOT_LANDING_TEST_ROOT/uploads"
+  state_root="$THE_BOT_LANDING_TEST_ROOT/state"; caddyfile="$THE_BOT_LANDING_TEST_ROOT/Caddyfile"
+  expected_caddy_sha=${THE_BOT_LANDING_TEST_CADDY_SHA:?}; test_mode=1
+else
+  landing_root=$production_root; upload_root=$production_upload; state_root=$production_state
+  caddyfile=$production_caddy; expected_caddy_sha=$baseline_caddy_sha; test_mode=0
+fi
+releases_root="$landing_root/releases"; records_root="$landing_root/deployments"; current_link="$landing_root/current"
+routing_state="$state_root/routing-v1.record"
+
+fail(){ printf 'LANDING_OPERATOR_ERROR %s\n' "$1" >&2; return 1; }
+sha256_file(){ sha256sum "$1" | awk '{print $1}'; }
+require_hex(){ [[ $1 =~ ^[0-9a-f]{$2}$ ]]; }
+validate_identity(){
+  local source=$1 digest=$2 deployment=$3
+  require_hex "$source" 40 || fail source_sha
+  require_hex "$digest" 64 || fail archive_sha256
+  [[ $deployment == "landing-${source}-"* && $deployment =~ ^landing-[0-9a-f]{40}-[0-9]{14}$ ]] || fail deployment_id
+}
+stat_value(){
+  if [[ $test_mode == 0 ]]; then stat -c "$1" "$2"; return; fi
+  case "$1" in
+    %F) [[ -d $2 ]] && printf directory || printf 'regular file';;
+    %u) stat -f %u "$2";; %a) stat -f %Lp "$2";; %h) stat -f %l "$2";; %s) stat -f %z "$2";;
+    *) fail stat_format;;
+  esac
+}
+validate_directory(){
+  local path=$1 expected_uid=$2 mode uid kind
+  [[ -d $path && ! -L $path ]] || fail "directory:$path"
+  [[ $(realpath "$path") == "$path" ]] || fail "directory-canonical:$path"
+  kind=$(stat_value %F "$path"); uid=$(stat_value %u "$path"); mode=$(stat_value %a "$path")
+  [[ $kind == directory && $uid == "$expected_uid" ]] || fail "directory-owner:$path"
+  (( (8#$mode & 8#022) == 0 )) || fail "directory-mode:$path"
+}
+validate_roots(){
+  local root_uid=0 deploy_uid
+  [[ $test_mode == 1 ]] && root_uid=$(id -u)
+  deploy_uid=$(id -u auth-deploy 2>/dev/null || true); [[ -n $deploy_uid ]] || { [[ $test_mode == 1 ]] && deploy_uid=$(id -u); }
+  [[ -n $deploy_uid ]] || fail auth_deploy_user
+  validate_directory "$landing_root" "$root_uid"; validate_directory "$upload_root" "$deploy_uid"
+  if [[ ! -e $releases_root ]]; then install -d -m 0755 "$releases_root"; fi
+  validate_directory "$releases_root" "$root_uid"
+  for path in "$records_root" "$state_root"; do if [[ ! -e $path ]]; then install -d -m 0700 "$path"; fi; validate_directory "$path" "$root_uid"; done
+}
+validate_upload(){
+  local archive=$1 expected_uid mode uid links kind size
+  expected_uid=$(id -u auth-deploy 2>/dev/null || true); [[ -n $expected_uid ]] || { [[ $test_mode == 1 ]] && expected_uid=$(id -u); }
+  [[ $archive == "$upload_root/"* && -f $archive && ! -L $archive ]] || fail upload_path
+  kind=$(stat_value %F "$archive"); uid=$(stat_value %u "$archive"); mode=$(stat_value %a "$archive"); links=$(stat_value %h "$archive"); size=$(stat_value %s "$archive")
+  [[ $kind == 'regular file' && $uid == "$expected_uid" && $mode == 600 && $links == 1 ]] || fail upload_metadata
+  (( size > 0 && size <= 52428800 )) || fail upload_size
+}
+validate_archive_entries(){
+  local archive=$1 entries=0 line type name list_flags=(-tzf) verbose_flags=(-tvzf)
+  if [[ $test_mode == 0 ]]; then list_flags=(--quoting-style=escape -tzf); verbose_flags=(--quoting-style=escape -tvzf); fi
+  while IFS= read -r name; do
+    ((entries+=1)); ((entries<=500)) || fail archive_entries
+    [[ $name == site || $name == site/ || $name == site/* ]] || fail archive_root
+    [[ $name != /* && $name != *'../'* && $name != '..' && $name != */.. && $name != *'\\'* ]] || fail archive_path
+  done < <(tar "${list_flags[@]}" "$archive")
+  ((entries>2)) || fail archive_empty
+  while IFS= read -r line; do type=${line:0:1}; [[ $type == '-' || $type == 'd' ]] || fail archive_type; done < <(tar "${verbose_flags[@]}" "$archive")
+}
+local_site_check(){
+  local root=$1
+  [[ -f $root/index.html && -f $root/schools/index.html ]] || fail release_pages
+  grep -Fq 'href="https://the-bot.ru/auth">Войти</a>' "$root/index.html" || fail root_login_marker
+  grep -Fq 'Платформа для управления репетиторским центром' "$root/schools/index.html" || fail schools_marker
+}
+service_checks(){ curl -fsS --max-time 15 https://the-bot.ru/auth >/dev/null && curl -fsS --max-time 15 https://avito.the-bot.ru/healthz >/dev/null; }
+public_root_check(){ local body; body=$(curl -fsS --max-time 15 https://the-bot.ru/); grep -Fq 'href="https://the-bot.ru/auth">Войти</a>' <<<"$body"; }
+public_full_check(){ local schools; public_root_check || return; schools=$(curl -fsS --max-time 15 https://the-bot.ru/schools/); grep -Fq 'Платформа для управления репетиторским центром' <<<"$schools" && curl -fsS --max-time 15 https://the-bot.ru/site.webmanifest >/dev/null && curl -fsS --max-time 15 https://the-bot.ru/assets/brand/favicon.ico >/dev/null && service_checks; }
+record_path(){ printf '%s/%s.record' "$records_root" "$1"; }
+record_value(){ sed -n "s/^$2=//p" "$1" | head -n1; }
+replace_symlink(){ if [[ $test_mode == 1 ]]; then mv -fh "$1" "$2"; else mv -Tf "$1" "$2"; fi; }
+validate_private_file(){
+  local file=$1 lines=$2 root_uid=0
+  [[ $test_mode == 1 ]] && root_uid=$(id -u)
+  [[ -f $file && ! -L $file && $(stat_value %F "$file") == 'regular file' && $(stat_value %u "$file") == "$root_uid" && $(stat_value %a "$file") == 600 && $(stat_value %h "$file") == 1 ]] || fail private_file_metadata
+  [[ $(wc -l <"$file" | tr -d ' ') == "$lines" ]] || fail private_file_shape
+}
+validate_record(){
+  validate_private_file "$1" 7 || fail deployment_record_metadata
+}
+write_record(){
+  local target=$1 state=$2 source=$3 digest=$4 release=$5 previous=$6 routing_sha=$7 temporary
+  temporary="${target}.tmp-$$"
+  (umask 077; printf 'version=1\nstate=%s\nsource=%s\ndigest=%s\nrelease=%s\nprevious=%s\nrouting_sha=%s\n' "$state" "$source" "$digest" "$release" "$previous" "$routing_sha" >"$temporary")
+  chmod 0600 "$temporary"; mv -f "$temporary" "$target"
+}
+current_release(){
+  if [[ ! -e $current_link && ! -L $current_link ]]; then printf 'NONE'; return; fi
+  [[ -L $current_link ]] || fail current_not_symlink
+  local target; target=$(readlink "$current_link"); [[ $target == "$releases_root/"* && -d $target && ! -L $target && $(realpath "$target") == "$target" ]] || fail current_target
+  printf '%s' "$target"
+}
+preflight(){
+  local archive=$1 source=$2 digest=$3 deployment=$4 expected_name
+  validate_identity "$source" "$digest" "$deployment"; expected_name="the-bot-landing-${deployment}.tar.gz"
+  [[ $archive == "$upload_root/$expected_name" ]] || fail archive_name
+  validate_roots; validate_upload "$archive"; [[ $(sha256_file "$archive") == "$digest" ]] || fail archive_digest
+  validate_archive_entries "$archive"; service_checks || fail dependency_health
+  printf 'LANDING_PREFLIGHT_OK source=%s deployment=%s sha256=%s\n' "$source" "$deployment" "$digest"
+}
+prepare_release(){
+  local archive=$1 source=$2 digest=$3 deployment=$4 release record previous staging extracted_size frozen temporary
+  preflight "$archive" "$source" "$digest" "$deployment" >/dev/null
+  release="$releases_root/$deployment"; record=$(record_path "$deployment"); [[ ! -e $release && ! -e $record ]] || fail release_exists
+  previous=$(current_release); frozen="$state_root/archive-${deployment}.tar.gz"
+  if [[ -e $frozen ]]; then [[ -f $frozen && ! -L $frozen && $(sha256_file "$frozen") == "$digest" ]] || fail frozen_archive_mismatch
+  else temporary="${frozen}.tmp-$$"; install -m 0600 "$archive" "$temporary"; [[ $(sha256_file "$temporary") == "$digest" ]] || { unlink "$temporary"; fail frozen_archive_digest; }; mv "$temporary" "$frozen"
+  fi
+  validate_archive_entries "$frozen"
+  staging="$landing_root/.prepare-${deployment}-$$"; install -d -m 0700 "$staging"
+  trap 'rm -rf -- "$staging"' RETURN
+  tar -xzf "$frozen" --no-same-owner --no-same-permissions -C "$staging"
+  [[ -d $staging/site && ! -L $staging/site ]] || fail extracted_root
+  [[ -z $(find "$staging/site" \( -type l -o -type b -o -type c -o -type p -o -type s \) -print -quit) ]] || fail extracted_special
+  extracted_size=$(du -sk "$staging/site" | awk '{print $1}'); ((extracted_size<=102400)) || fail extracted_size
+  local_site_check "$staging/site"
+  mv "$staging/site" "$release"; trap - RETURN
+  if [[ $test_mode == 0 ]]; then chown -R root:root "$release"; fi
+  find "$release" -type d -exec chmod 0555 {} +; find "$release" -type f -exec chmod 0444 {} +
+  write_record "$record" prepared "$source" "$digest" "$release" "$previous" NONE
+  printf 'LANDING_RELEASE_PREPARED source=%s deployment=%s previous=%s\n' "$source" "$deployment" "$previous"
+}
+validate_caddy_shape(){
+  [[ $(grep -Fc 'root * /var/www/the-bot-landing/current' "$1") == 1 ]] || fail caddy_root
+  [[ $(grep -Fc 'reverse_proxy 127.0.0.1:3001' "$1") == 1 ]] || fail caddy_fallback
+}
+render_caddy(){
+  local source=$1 target=$2
+  awk 'BEGIN{n=0} index($0," path ")&&index($0," / ")&&index($0," /privacy.html")&&index($0," /legal.css") {print $0 " /site.webmanifest /assets/brand/* /schools /schools/*";n++;next} {print} END{if(n!=1)exit 42}' "$source" >"$target"
+  grep -Fq '/site.webmanifest /assets/brand/* /schools /schools/*' "$target" || fail caddy_routes
+}
+restore_caddy(){
+  local backup=$1 temporary="${caddyfile}.restore-$$"
+  cp -p "$backup" "$temporary"; mv -f "$temporary" "$caddyfile"
+  caddy validate --config "$caddyfile" >/dev/null && systemctl reload caddy
+}
+apply_routing(){
+  local deployment=$1 record backup candidate current_sha routed_sha state_sha state_baseline state_tmp
+  [[ $deployment =~ ^landing-[0-9a-f]{40}-[0-9]{14}$ ]] || fail deployment_id
+  validate_roots; record=$(record_path "$deployment"); validate_record "$record"; [[ $(record_value "$record" state) == prepared ]] || fail prepared_record
+  [[ -f $caddyfile && ! -L $caddyfile && $(realpath "$caddyfile") == "$caddyfile" ]] || fail caddyfile; current_sha=$(sha256_file "$caddyfile")
+  if [[ $current_sha != "$expected_caddy_sha" ]]; then
+    validate_private_file "$routing_state" 2 || fail caddy_sha
+    state_baseline=$(record_value "$routing_state" baseline); state_sha=$(record_value "$routing_state" routed)
+    [[ $state_baseline == "$expected_caddy_sha" && $state_sha == "$current_sha" ]] || fail caddy_routing_state
+    validate_caddy_shape "$caddyfile"; grep -Fq '/site.webmanifest /assets/brand/* /schools /schools/*' "$caddyfile" || fail caddy_routes
+    public_root_check && service_checks || fail caddy_reuse_health
+    write_record "$record" routing-ready "$(record_value "$record" source)" "$(record_value "$record" digest)" "$(record_value "$record" release)" "$(record_value "$record" previous)" "$current_sha"
+    printf 'LANDING_ROUTING_REUSED deployment=%s caddy_sha256=%s\n' "$deployment" "$current_sha"; return
+  fi
+  validate_caddy_shape "$caddyfile"; backup="$state_root/caddy-${deployment}.before"
+  if [[ -e $backup ]]; then [[ -f $backup && ! -L $backup && $(sha256_file "$backup") == "$expected_caddy_sha" ]] || fail caddy_backup_mismatch
+  else cp -p "$caddyfile" "$backup"; chmod 0600 "$backup"
+  fi
+  candidate="$state_root/caddy-${deployment}.candidate"; render_caddy "$caddyfile" "$candidate"
+  caddy validate --config "$candidate" >/dev/null || fail caddy_candidate
+  routed_sha=$(sha256_file "$candidate"); install -m 0644 "$candidate" "${caddyfile}.candidate-$$"; mv -f "${caddyfile}.candidate-$$" "$caddyfile"
+  if ! caddy validate --config "$caddyfile" >/dev/null || ! systemctl reload caddy || ! public_root_check || ! service_checks; then
+    restore_caddy "$backup" || fail caddy_restore_ambiguous
+    public_root_check && service_checks || fail caddy_restore_health_ambiguous
+    fail caddy_routing_rolled_back
+  fi
+  state_tmp="${routing_state}.tmp-$$"; (umask 077; printf 'baseline=%s\nrouted=%s\n' "$expected_caddy_sha" "$routed_sha" >"$state_tmp"); chmod 0600 "$state_tmp"; mv -f "$state_tmp" "$routing_state"
+  write_record "$record" routing-ready "$(record_value "$record" source)" "$(record_value "$record" digest)" "$(record_value "$record" release)" "$(record_value "$record" previous)" "$routed_sha"
+  printf 'LANDING_ROUTING_READY deployment=%s caddy_sha256=%s\n' "$deployment" "$routed_sha"
+}
+activate_release(){
+  local deployment=$1 record release previous routing_sha current temporary
+  [[ $deployment =~ ^landing-[0-9a-f]{40}-[0-9]{14}$ ]] || fail deployment_id
+  validate_roots; record=$(record_path "$deployment"); validate_record "$record"
+  [[ $(record_value "$record" state) == routing-ready ]] || fail routing_not_ready
+  release=$(record_value "$record" release); previous=$(record_value "$record" previous); routing_sha=$(record_value "$record" routing_sha)
+  [[ $release == "$releases_root/$deployment" && -d $release && $(sha256_file "$caddyfile") == "$routing_sha" ]] || fail deployment_identity
+  current=$(current_release); [[ $current == "$previous" ]] || fail current_changed
+  temporary="$landing_root/.current-${deployment}-$$"; ln -s "$release" "$temporary"; replace_symlink "$temporary" "$current_link"
+  if ! local_site_check "$release" || ! public_full_check; then
+    if [[ $previous == NONE ]]; then unlink "$current_link"; else temporary="$landing_root/.rollback-${deployment}-$$"; ln -s "$previous" "$temporary"; replace_symlink "$temporary" "$current_link"; fi
+    fail deploy_postcheck_rolled_back
+  fi
+  write_record "$record" active "$(record_value "$record" source)" "$(record_value "$record" digest)" "$release" "$previous" "$routing_sha"
+  printf 'LANDING_DEPLOYED source=%s deployment=%s\n' "$(record_value "$record" source)" "$deployment"
+}
+rollback_release(){
+  local deployment=$1 record release previous routing_sha current temporary
+  [[ $deployment =~ ^landing-[0-9a-f]{40}-[0-9]{14}$ ]] || fail deployment_id
+  validate_roots; record=$(record_path "$deployment"); validate_record "$record"; [[ $(record_value "$record" state) == active ]] || fail active_record
+  release=$(record_value "$record" release); previous=$(record_value "$record" previous); routing_sha=$(record_value "$record" routing_sha); current=$(current_release)
+  [[ $current == "$release" && $previous != NONE && $previous == "$releases_root/"* && -d $previous ]] || fail rollback_identity
+  temporary="$landing_root/.rollback-${deployment}-$$"; ln -s "$previous" "$temporary"; replace_symlink "$temporary" "$current_link"
+  public_root_check && service_checks || fail rollback_postcheck_ambiguous
+  write_record "$record" rolled-back "$(record_value "$record" source)" "$(record_value "$record" digest)" "$release" "$previous" "$routing_sha"
+  printf 'LANDING_ROLLED_BACK deployment=%s current=%s\n' "$deployment" "$previous"
+}
+main(){
+  [[ $EUID == 0 ]] || fail root_required
+  [[ ${SUDO_USER-} == auth-deploy ]] || fail caller
+  [[ -z ${THE_BOT_LANDING_TEST_ROOT-} && -z ${THE_BOT_LANDING_TEST_CADDY_SHA-} ]] || fail test_environment
+  export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+  local action=${1-}; shift || true
+  if [[ $action == prepare || $action == routing || $action == deploy || $action == rollback ]]; then
+    validate_roots; exec 9>"$state_root/operator.lock"; flock -x 9
+  fi
+  case "$action" in
+    contract) (($#==0))||fail arguments; printf '%s\n' "$contract";;
+    preflight) (($#==4))||fail arguments; preflight "$@";;
+    prepare) (($#==4))||fail arguments; prepare_release "$@";;
+    routing) (($#==1))||fail arguments; apply_routing "$1";;
+    deploy) (($#==1))||fail arguments; activate_release "$1";;
+    rollback) (($#==1))||fail arguments; rollback_release "$1";;
+    *) fail action;;
+  esac
+}
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then main "$@"; fi
