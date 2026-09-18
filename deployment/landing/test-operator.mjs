@@ -43,7 +43,7 @@ function hostileArchive(name,type="0"){
 
 try {
 const operatorSource=readFileSync(operator,"utf8"),installer=readFileSync(path.join(here,"install-operator.sh"),"utf8"),sudoers=readFileSync(path.join(here,"sudoers-auth-deploy-landing"),"utf8"),checksums=readFileSync(path.join(here,"operator-checksums.sha256"),"utf8");
-for(const token of ["SUDO_USER-} == auth-deploy","/var/www/the-bot-landing","/home/auth-deploy/uploads","f17b0bed053548f13e4e96f6c8e51d83e5d93f1eddcc404b26e4c0a9aab1615d","60b10991eb32235fc9b462c4d7aadd923b795ad3df774b476ca8a1389594df9a","landing-c3abfb3ee76616c9c85313aa958dd5b88a6592a8-20260918100401","--quoting-style=escape -tvzf","archive_declared_size","write_journal","fsync_path","mv -Tf","flock -x","--adapter caddyfile","install -o root -g root -m 0644","public_root_reachable","systemctl reload caddy","--write-out '%{http_code}'","id=\"auth-heading\">ВХОД</h1>","\"status\":\"ok\"","deploy_postcheck_rolled_back","caddy_routing_rolled_back","LANDING_HTML_POLICY_READY","no-store, max-age=0"])assert.ok(operatorSource.includes(token),token);
+for(const token of ["SUDO_USER-} == auth-deploy","/var/www/the-bot-landing","/home/auth-deploy/uploads","f17b0bed053548f13e4e96f6c8e51d83e5d93f1eddcc404b26e4c0a9aab1615d","60b10991eb32235fc9b462c4d7aadd923b795ad3df774b476ca8a1389594df9a","landing-c3abfb3ee76616c9c85313aa958dd5b88a6592a8-20260918100401","@the_bot_public_landing","--quoting-style=escape -tvzf","archive_declared_size","write_journal","fsync_path","mv -Tf","flock -x","--adapter caddyfile","install -o root -g root -m 0644","public_root_reachable","systemctl reload caddy","--write-out '%{http_code}'","id=\"auth-heading\">ВХОД</h1>","\"status\":\"ok\"","deploy_postcheck_rolled_back","caddy_routing_rolled_back","LANDING_HTML_POLICY_READY","no-store, max-age=0"])assert.ok(operatorSource.includes(token),token);
 assert.match(sudoers,/^auth-deploy ALL=\(root\) NOPASSWD: \/usr\/local\/sbin\/deploy-the-bot-landing \*$/m);
 assert.match(installer,/sha256sum -c operator-checksums\.sha256/);assert.match(installer,/visudo -cf/);assert.match(installer,/trap 'rollback' ERR/);
 assert.equal(checksums,`${sha(Buffer.from(operatorSource))}  deploy-the-bot-landing\n${sha(Buffer.from(sudoers))}  sudoers-auth-deploy-landing\n${sha(Buffer.from(installer))}  install-operator.sh\n`);
@@ -58,7 +58,7 @@ for(const required of ["site/index.html","site/schools/index.html","site/site.we
 assert.doesNotMatch(entries,/deployment|AGENTS|check-site\.mjs|\.governance/);
 
 const unrelatedSite=`other.the-bot.ru {\n  @other path / /privacy.html /legal.css\n  handle @other {\n    root * /srv/other-site\n    file_server\n  }\n  reverse_proxy 127.0.0.1:3001\n}\n`;
-const caddy=`the-bot.ru {\n  @landing path / /index.html /privacy.html /terms.html /contacts.html /legal.css /release.html /logo.png /icon.png /problem-rules.png\n  handle @landing {\n    root * /var/www/the-bot-landing/current\n    file_server\n  }\n  reverse_proxy 127.0.0.1:3001\n}\n${unrelatedSite}`;
+const caddy=`the-bot.ru {\n  @the_bot_public_landing {\n    path / /index.html /privacy.html /terms.html /contacts.html /legal.css /release.html /logo.png /icon.png /problem-rules.png\n  }\n  handle @the_bot_public_landing {\n    root * /var/www/the-bot-landing/current\n    file_server\n  }\n  reverse_proxy 127.0.0.1:3001\n}\n${unrelatedSite}`;
 const routedFixtureCaddy=caddy.replace(" /problem-rules.png"," /problem-rules.png /site.webmanifest /assets/brand/* /schools /schools/*");
 function makeFixture(label,archiveBody=bodyA,chosenDeployment=deployment){
   const fixture=temporaryDirectory(`landing-operator-${label}-`),www=path.join(fixture,"www"),uploads=path.join(fixture,"uploads"),state=path.join(fixture,"state"),mockbin=path.join(fixture,"bin");
@@ -98,11 +98,17 @@ printf '%s' "$body" >"$output"; printf '%s' "$status"
 `,{mode:0o755});
   writeFileSync(path.join(mockbin,"flock"),"#!/bin/sh\nexit 0\n",{mode:0o755});
   const harness=path.join(fixture,"harness.sh");
-  writeFileSync(harness,`#!/usr/bin/env bash\nset -euo pipefail\nexport THE_BOT_LANDING_TEST_ROOT=${JSON.stringify(fixture)}\nexport THE_BOT_LANDING_TEST_CADDY_SHA=${sha(Buffer.from(caddy))}\nexport THE_BOT_LANDING_TEST_POLICY_DEPLOYMENT=${JSON.stringify(chosenDeployment)}\nexport THE_BOT_LANDING_TEST_POLICY_SOURCE=${JSON.stringify(source)}\nexport THE_BOT_LANDING_TEST_POLICY_CADDY_SHA=${sha(Buffer.from(routedFixtureCaddy))}\nexport PATH=${JSON.stringify(`${mockbin}:${process.env.PATH}`)}\nsource ${JSON.stringify(operator)}\naction=$1; shift\ncase "$action" in prepare) prepare_release "$@";; routing) apply_routing "$@";; html-policy) apply_html_policy "$@";; deploy) activate_release "$@";; rollback) rollback_release "$@";; check) public_full_check;; esac\n`,{mode:0o755});
+  writeFileSync(harness,`#!/usr/bin/env bash\nset -euo pipefail\nexport THE_BOT_LANDING_TEST_ROOT=${JSON.stringify(fixture)}\nexport THE_BOT_LANDING_TEST_CADDY_SHA=${sha(Buffer.from(caddy))}\nexport THE_BOT_LANDING_TEST_POLICY_DEPLOYMENT=${JSON.stringify(chosenDeployment)}\nexport THE_BOT_LANDING_TEST_POLICY_SOURCE=${JSON.stringify(source)}\nexport THE_BOT_LANDING_TEST_POLICY_CADDY_SHA=${sha(Buffer.from(routedFixtureCaddy))}\nexport PATH=${JSON.stringify(`${mockbin}:${process.env.PATH}`)}\nsource ${JSON.stringify(operator)}\naction=$1; shift\ncase "$action" in prepare) prepare_release "$@";; routing) apply_routing "$@";; html-policy) apply_html_policy "$@";; render-policy) render_html_policy "$@";; deploy) activate_release "$@";; rollback) rollback_release "$@";; check) public_full_check;; esac\n`,{mode:0o755});
   return {fixture,www,uploads,state,previous,caddyPath,copy,harness,deployment:chosenDeployment,digest:sha(archiveBody)};
 }
 const act=(f,action,args=[],env={})=>run("bash",[f.harness,action,...args],{env:{...process.env,...env}});
+const recordValue=(body,key)=>body.match(new RegExp(`^${key}=(.*)$`,"m"))?.[1];
 const fixtureData=makeFixture("main"),{fixture,www,uploads,state,previous,caddyPath,copy,harness}=fixtureData;
+const renderCase=(name,body)=>{const input=path.join(fixture,`${name}.input`),output=path.join(fixture,`${name}.output`);writeFileSync(input,body,{mode:0o600});return act(fixtureData,"render-policy",[input,output])};
+const matcherBlock=routedFixtureCaddy.match(/  @the_bot_public_landing \{\n    path[^\n]+\n  \}\n/)?.[0];assert.ok(matcherBlock);
+let renderResult=renderCase("missing-policy-anchor",routedFixtureCaddy.replaceAll("@the_bot_public_landing","@different_landing"));assert.notEqual(renderResult.status,0);assert.match(renderResult.stderr,/html_policy_render/);
+renderResult=renderCase("duplicate-policy-anchor",routedFixtureCaddy.replace(matcherBlock,`${matcherBlock}${matcherBlock}`));assert.notEqual(renderResult.status,0);assert.match(renderResult.stderr,/html_policy_render/);
+renderResult=renderCase("ambiguous-target-site",`${routedFixtureCaddy}\n${routedFixtureCaddy}`);assert.notEqual(renderResult.status,0);assert.match(renderResult.stderr,/html_policy_render/);
 let result=run("bash",[harness,"prepare",copy,source,sha(bodyA),deployment]);assert.equal(result.status,0,result.stderr);assert.match(result.stdout,/LANDING_RELEASE_PREPARED/);
 const record=path.join(www,"deployments",`${deployment}.record`);assert.match(readFileSync(record,"utf8"),/state=prepared/);
 result=run("bash",[harness,"routing",deployment],{env:{...process.env,MOCK_PUBLIC_FAIL:"1"}});assert.notEqual(result.status,0);assert.match(result.stderr,/caddy_routing_rolled_back/);assert.equal(readFileSync(caddyPath,"utf8"),caddy,"failed routing must restore exact Caddy bytes");assert.equal(lstatSync(caddyPath).mode&0o777,0o644,"failed routing must restore a readable live Caddyfile");assert.match(readFileSync(record,"utf8"),/state=prepared/);
@@ -131,6 +137,30 @@ const activateFixture=f=>{
   assert.equal(act(f,"routing",[f.deployment]).status,0);
   assert.equal(act(f,"deploy",[f.deployment]).status,0);
 };
+const reloadCount=f=>(readFileSync(path.join(f.fixture,"calls"),"utf8").match(/systemctl reload caddy/g)||[]).length;
+function seedHtmlPolicyRenderFailure(f,{journalSource=source,backupSuffix=""}={}){
+  const recordBody=readFileSync(path.join(f.www,"deployments",`${f.deployment}.record`),"utf8"),release=recordValue(recordBody,"release"),previousRelease=recordValue(recordBody,"previous"),releaseHash=recordValue(recordBody,"release_sha"),digest=recordValue(recordBody,"digest");
+  const beforeBody=readFileSync(f.caddyPath,"utf8"),before=sha(Buffer.from(beforeBody)),backup=path.join(f.state,`caddy-${f.deployment}.html-policy.before`),candidate=path.join(f.state,`caddy-${f.deployment}.html-policy.candidate`),journal=path.join(f.state,`html-policy-${f.deployment}.journal`);
+  writeFileSync(backup,`${beforeBody}${backupSuffix}`,{mode:0o600});chmodSync(backup,0o600);
+  writeFileSync(candidate,"partial candidate from rejected renderer\n",{mode:0o644});chmodSync(candidate,0o644);
+  writeFileSync(journal,`version=1\noperation=html-policy\nphase=intent\ndeployment=${f.deployment}\nsource=${journalSource}\ndigest=${digest}\nrelease=${release}\nprevious=${previousRelease}\nbefore_sha=${before}\nafter_sha=PENDING\nrelease_sha=${releaseHash}\n`,{mode:0o600});chmodSync(journal,0o600);
+  return {backup,candidate,journal,beforeBody};
+}
+const reconciledPolicy=makeFixture("html-policy-existing-render-failure",bodyA,deployment);activateFixture(reconciledPolicy);const seededPolicy=seedHtmlPolicyRenderFailure(reconciledPolicy);
+const reconciledReloadsBefore=reloadCount(reconciledPolicy);
+result=act(reconciledPolicy,"html-policy",[reconciledPolicy.deployment]);assert.equal(result.status,0,result.stderr);assert.match(result.stdout,/LANDING_HTML_POLICY_READY/);
+const reconciledLive=readFileSync(reconciledPolicy.caddyPath,"utf8"),reconciledCandidate=readFileSync(seededPolicy.candidate,"utf8");
+assert.equal(reconciledCandidate,reconciledLive,"same-ID reconciliation must overwrite the partial candidate with the installed bytes");assert.notEqual(reconciledCandidate,"partial candidate from rejected renderer\n");
+assert.equal(lstatSync(seededPolicy.candidate).mode&0o777,0o600);assert.equal(reloadCount(reconciledPolicy),reconciledReloadsBefore+1,"same-ID reconciliation must reload exactly once");
+assert.match(readFileSync(seededPolicy.journal,"utf8"),/phase=done/);assert.ok(readFileSync(reconciledPolicy.caddyPath,"utf8").endsWith(unrelatedSite));
+
+const mismatchedPolicyJournal=makeFixture("html-policy-mismatched-journal",bodyA,deployment);activateFixture(mismatchedPolicyJournal);seedHtmlPolicyRenderFailure(mismatchedPolicyJournal,{journalSource:"0".repeat(40)});const mismatchedJournalBefore=readFileSync(mismatchedPolicyJournal.caddyPath),mismatchedJournalReloads=reloadCount(mismatchedPolicyJournal);
+result=act(mismatchedPolicyJournal,"html-policy",[mismatchedPolicyJournal.deployment]);assert.notEqual(result.status,0);assert.match(result.stderr,/journal_identity/);assert.deepEqual(readFileSync(mismatchedPolicyJournal.caddyPath),mismatchedJournalBefore);assert.equal(reloadCount(mismatchedPolicyJournal),mismatchedJournalReloads);
+const mismatchedPolicyBackup=makeFixture("html-policy-mismatched-backup",bodyA,deployment);activateFixture(mismatchedPolicyBackup);seedHtmlPolicyRenderFailure(mismatchedPolicyBackup,{backupSuffix:"# mismatch\n"});const mismatchedBackupBefore=readFileSync(mismatchedPolicyBackup.caddyPath),mismatchedBackupReloads=reloadCount(mismatchedPolicyBackup);
+result=act(mismatchedPolicyBackup,"html-policy",[mismatchedPolicyBackup.deployment]);assert.notEqual(result.status,0);assert.match(result.stderr,/html_policy_backup_mismatch/);assert.deepEqual(readFileSync(mismatchedPolicyBackup.caddyPath),mismatchedBackupBefore);assert.equal(reloadCount(mismatchedPolicyBackup),mismatchedBackupReloads);
+const mismatchedPolicyCurrent=makeFixture("html-policy-mismatched-current",bodyA,deployment);activateFixture(mismatchedPolicyCurrent);seedHtmlPolicyRenderFailure(mismatchedPolicyCurrent);writeFileSync(mismatchedPolicyCurrent.caddyPath,`${readFileSync(mismatchedPolicyCurrent.caddyPath,"utf8")}# drift\n`,{mode:0o644});chmodSync(mismatchedPolicyCurrent.caddyPath,0o644);const mismatchedCurrentBefore=readFileSync(mismatchedPolicyCurrent.caddyPath),mismatchedCurrentReloads=reloadCount(mismatchedPolicyCurrent);
+result=act(mismatchedPolicyCurrent,"html-policy",[mismatchedPolicyCurrent.deployment]);assert.notEqual(result.status,0);assert.match(result.stderr,/html_policy_changed/);assert.deepEqual(readFileSync(mismatchedPolicyCurrent.caddyPath),mismatchedCurrentBefore);assert.equal(reloadCount(mismatchedPolicyCurrent),mismatchedCurrentReloads);
+
 const policy=makeFixture("html-policy",bodyA,deployment);activateFixture(policy);
 const policyBefore=readFileSync(policy.caddyPath,"utf8"),policyCurrentBefore=readlinkSync(path.join(policy.www,"current"));
 const reloadsBefore=(readFileSync(path.join(policy.fixture,"calls"),"utf8").match(/systemctl reload caddy/g)||[]).length;
@@ -140,6 +170,7 @@ assert.equal(readlinkSync(path.join(policy.www,"current")),policyCurrentBefore,"
 assert.equal(lstatSync(policy.caddyPath).mode&0o777,0o644);assert.ok(policyAfter.endsWith(unrelatedSite),"unrelated site block must remain byte-identical");
 assert.equal(policyAfter.split("@legacy_release path /release.html").length-1,1);assert.equal(policyAfter.split("redir @legacy_release / 308").length-1,1);
 assert.equal(policyAfter.split("@landing_html path / /index.html").length-1,1);assert.equal(policyAfter.split('header @landing_html Cache-Control "no-store, max-age=0"').length-1,1);
+assert.match(policyAfter,/header @landing_html Cache-Control "no-store, max-age=0"\n  @the_bot_public_landing \{/,"policy directives must be immediately before the exact production matcher");
 assert.equal((policyCalls.match(/systemctl reload caddy/g)||[]).length,reloadsBefore+1,"policy transition reloads Caddy exactly once");
 assert.match(policyCalls,/curl https:\/\/the-bot\.ru\/index\.html/);assert.match(policyCalls,/curl https:\/\/the-bot\.ru\/release\.html/);
 assert.match(policyCalls,new RegExp(`caddy validate --config ${path.join(policy.state,`caddy-${policy.deployment}.html-policy.candidate`).replaceAll("/","\\/")} --adapter caddyfile`));
@@ -176,7 +207,6 @@ for(const phase of ["html_policy_after_caddy","html_policy_before_state"]){
 let scenario=20;
 const nextId=()=>`landing-${source}-20260918${String(200000+scenario++).padStart(6,"0")}`;
 const prepareFixture=f=>act(f,"prepare",[f.copy,source,f.digest,f.deployment]);
-const recordValue=(body,key)=>body.match(new RegExp(`^${key}=(.*)$`,"m"))?.[1];
 function seedLegacyRoutingFailure(f){
   const recordBody=readFileSync(path.join(f.www,"deployments",`${f.deployment}.record`),"utf8"),release=recordValue(recordBody,"release"),previousRelease=recordValue(recordBody,"previous"),releaseHash=recordValue(recordBody,"release_sha");
   const routed=caddy.replace(" /problem-rules.png"," /problem-rules.png /site.webmanifest /assets/brand/* /schools /schools/*"),before=sha(Buffer.from(caddy)),after=sha(Buffer.from(routed));

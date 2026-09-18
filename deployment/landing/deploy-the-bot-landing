@@ -329,10 +329,10 @@ validate_html_policy(){
       targets++; inside=1; depth=0
     }
     inside {
-      if ($0 ~ /^[[:space:]]*@legacy_release[[:space:]]+path[[:space:]]+\/release\.html[[:space:]]*$/) release_matchers++
-      if ($0 ~ /^[[:space:]]*redir[[:space:]]+@legacy_release[[:space:]]+\/[[:space:]]+308[[:space:]]*$/) redirects++
-      if ($0 ~ /^[[:space:]]*@landing_html[[:space:]]+path[[:space:]]+\/[[:space:]]+\/index\.html[[:space:]]*$/) html_matchers++
-      if ($0 ~ /^[[:space:]]*header[[:space:]]+@landing_html[[:space:]]+Cache-Control[[:space:]]+"no-store, max-age=0"[[:space:]]*$/) headers++
+      if (depth==1 && $0 ~ /^[[:space:]]*@legacy_release[[:space:]]+path[[:space:]]+\/release\.html[[:space:]]*$/) release_matchers++
+      if (depth==1 && $0 ~ /^[[:space:]]*redir[[:space:]]+@legacy_release[[:space:]]+\/[[:space:]]+308[[:space:]]*$/) redirects++
+      if (depth==1 && $0 ~ /^[[:space:]]*@landing_html[[:space:]]+path[[:space:]]+\/[[:space:]]+\/index\.html[[:space:]]*$/) html_matchers++
+      if (depth==1 && $0 ~ /^[[:space:]]*header[[:space:]]+@landing_html[[:space:]]+Cache-Control[[:space:]]+"no-store, max-age=0"[[:space:]]*$/) headers++
       line=$0; opens=gsub(/\{/, "{", line); closes=gsub(/\}/, "}", line); depth+=opens-closes
       if (depth==0) inside=0
     }
@@ -347,7 +347,7 @@ render_html_policy(){
       targets++; inside=1; depth=0
     }
     {
-      if (inside && $0 ~ /^[[:space:]]*@landing[[:space:]]+path[[:space:]]+\/[[:space:]]+/) {
+      if (inside && depth==1 && $0 ~ /^[[:space:]]*@the_bot_public_landing[[:space:]]*\{[[:space:]]*$/) {
         match($0,/^[[:space:]]*/); indent=substr($0,1,RLENGTH)
         print indent "@legacy_release path /release.html"
         print indent "redir @legacy_release / 308"
