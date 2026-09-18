@@ -43,7 +43,7 @@ function hostileArchive(name,type="0"){
 
 try {
 const operatorSource=readFileSync(operator,"utf8"),installer=readFileSync(path.join(here,"install-operator.sh"),"utf8"),sudoers=readFileSync(path.join(here,"sudoers-auth-deploy-landing"),"utf8");
-for(const token of ["SUDO_USER-} == auth-deploy","/var/www/the-bot-landing","/home/auth-deploy/uploads","f17b0bed053548f13e4e96f6c8e51d83e5d93f1eddcc404b26e4c0a9aab1615d","--quoting-style=escape -tvzf","archive_declared_size","write_journal","fsync_path","mv -Tf","flock -x","--adapter caddyfile","systemctl reload caddy","--write-out '%{http_code}'","id=\"auth-heading\">ВХОД</h1>","\"status\":\"ok\"","deploy_postcheck_rolled_back","caddy_routing_rolled_back"])assert.ok(operatorSource.includes(token),token);
+for(const token of ["SUDO_USER-} == auth-deploy","/var/www/the-bot-landing","/home/auth-deploy/uploads","f17b0bed053548f13e4e96f6c8e51d83e5d93f1eddcc404b26e4c0a9aab1615d","--quoting-style=escape -tvzf","archive_declared_size","write_journal","fsync_path","mv -Tf","flock -x","--adapter caddyfile","install -o root -g root -m 0644","public_root_reachable","systemctl reload caddy","--write-out '%{http_code}'","id=\"auth-heading\">ВХОД</h1>","\"status\":\"ok\"","deploy_postcheck_rolled_back","caddy_routing_rolled_back"])assert.ok(operatorSource.includes(token),token);
 assert.match(sudoers,/^auth-deploy ALL=\(root\) NOPASSWD: \/usr\/local\/sbin\/deploy-the-bot-landing \*$/m);
 assert.match(installer,/sha256sum -c operator-checksums\.sha256/);assert.match(installer,/visudo -cf/);assert.match(installer,/trap 'rollback' ERR/);
 
@@ -75,10 +75,10 @@ exit "\${MOCK_CADDY_STATUS:-0}"
   writeFileSync(path.join(mockbin,"curl"),`#!/bin/sh
 output=''; url=''; while [ "$#" -gt 0 ]; do case "$1" in --output) output=$2; shift 2;; --write-out) shift 2;; --*) shift;; *) url=$1; shift;; esac; done
 printf 'curl %s\\n' "$url" >>"${fixture}/calls"
-if [ "\${MOCK_PUBLIC_FAIL:-0}" = 1 ] && [ "$url" = 'https://the-bot.ru/' ]; then exit 22; fi
+if [ "\${MOCK_PUBLIC_FAIL:-0}" = 1 ] && [ "$url" = 'https://the-bot.ru/' ] && [ ! -e ${JSON.stringify(path.join(fixture,"public-failed-once"))} ]; then : >${JSON.stringify(path.join(fixture,"public-failed-once"))}; exit 22; fi
 status=200; [ "\${MOCK_REDIRECT_URL:-}" != "$url" ] || status=302
 case "$url" in
-  https://the-bot.ru/) body='<a href="https://the-bot.ru/auth">Войти</a>';;
+  https://the-bot.ru/) if [ "\${MOCK_FORCE_RELEASE_MARKER:-0}" = 1 ] || [ "$(readlink ${JSON.stringify(path.join(www,"current"))})" != ${JSON.stringify(previous)} ]; then body='<a href="https://the-bot.ru/auth">Войти</a>'; else body='legacy landing without release marker'; fi;;
   https://the-bot.ru/schools/) body='Платформа для управления репетиторским центром';;
   https://the-bot.ru/auth) body='<h1 id="auth-heading">ВХОД</h1>';;
   https://avito.the-bot.ru/healthz) body='{"status":"ok","mode":"read-only"}' ;;
@@ -95,9 +95,9 @@ const act=(f,action,args=[],env={})=>run("bash",[f.harness,action,...args],{env:
 const fixtureData=makeFixture("main"),{fixture,www,uploads,state,previous,caddyPath,copy,harness}=fixtureData;
 let result=run("bash",[harness,"prepare",copy,source,sha(bodyA),deployment]);assert.equal(result.status,0,result.stderr);assert.match(result.stdout,/LANDING_RELEASE_PREPARED/);
 const record=path.join(www,"deployments",`${deployment}.record`);assert.match(readFileSync(record,"utf8"),/state=prepared/);
-result=run("bash",[harness,"routing",deployment],{env:{...process.env,MOCK_PUBLIC_FAIL:"1"}});assert.notEqual(result.status,0);assert.equal(readFileSync(caddyPath,"utf8"),caddy,"failed routing must restore exact Caddy bytes");assert.match(readFileSync(record,"utf8"),/state=prepared/);
+result=run("bash",[harness,"routing",deployment],{env:{...process.env,MOCK_PUBLIC_FAIL:"1"}});assert.notEqual(result.status,0);assert.match(result.stderr,/caddy_routing_rolled_back/);assert.equal(readFileSync(caddyPath,"utf8"),caddy,"failed routing must restore exact Caddy bytes");assert.equal(lstatSync(caddyPath).mode&0o777,0o644,"failed routing must restore a readable live Caddyfile");assert.match(readFileSync(record,"utf8"),/state=prepared/);
 const failedRoutingCalls=readFileSync(path.join(fixture,"calls"),"utf8");assert.equal(failedRoutingCalls.split(`caddy validate --config ${path.join(state,`caddy-${deployment}.candidate`)} --adapter caddyfile`).length-1,1,"candidate validation must name the Caddyfile adapter");assert.equal(failedRoutingCalls.split(`caddy validate --config ${caddyPath} --adapter caddyfile`).length-1,2,"current and restored Caddyfile validation must name the adapter");
-result=run("bash",[harness,"routing",deployment]);assert.equal(result.status,0,result.stderr);
+result=run("bash",[harness,"routing",deployment]);assert.equal(result.status,0,result.stderr);assert.match(result.stdout,/LANDING_ROUTING_READY/,"routing must succeed while the legacy landing remains current");assert.equal(readlinkSync(path.join(www,"current")),previous,"routing must not activate the prepared release");
 const routedCaddy=readFileSync(caddyPath,"utf8");assert.match(routedCaddy,/\/site\.webmanifest \/assets\/brand\/\* \/schools \/schools\/\*/);assert.equal(routedCaddy.split("/site.webmanifest /assets/brand/* /schools /schools/*").length-1,1);assert.ok(routedCaddy.endsWith(unrelatedSite),"routing must preserve the unrelated site block byte-for-byte");assert.match(readFileSync(record,"utf8"),/state=routing-ready/);
 result=run("bash",[harness,"deploy",deployment]);assert.equal(result.status,0,result.stderr);assert.equal(readlinkSync(path.join(www,"current")),path.join(www,"releases",deployment));assert.match(readFileSync(record,"utf8"),/state=active/);
 result=run("bash",[harness,"rollback",deployment]);assert.equal(result.status,0,result.stderr);assert.equal(readlinkSync(path.join(www,"current")),previous);assert.match(readFileSync(record,"utf8"),/state=rolled-back/);
@@ -113,7 +113,7 @@ const unsafeDeployment=deployment.replace(/01$/,"04"),unsafePath=path.join(uploa
 const unsafe=run("bash",[harness,"prepare",unsafePath,source,sha(bodyA),unsafeDeployment]);assert.notEqual(unsafe.status,0);assert.match(unsafe.stderr,/upload_metadata/);
 
 for(const url of ["https://the-bot.ru/","https://the-bot.ru/schools/","https://the-bot.ru/site.webmanifest","https://the-bot.ru/assets/brand/favicon.ico","https://the-bot.ru/auth","https://avito.the-bot.ru/healthz"]){
-  const redirected=act(fixtureData,"check",[],{MOCK_REDIRECT_URL:url});assert.notEqual(redirected.status,0,`redirect must fail: ${url}`);assert.match(redirected.stderr,/http_status:302/);
+  const redirected=act(fixtureData,"check",[],{MOCK_REDIRECT_URL:url,MOCK_FORCE_RELEASE_MARKER:"1"});assert.notEqual(redirected.status,0,`redirect must fail: ${url}`);assert.match(redirected.stderr,/http_status:302/);
 }
 
 let scenario=20;

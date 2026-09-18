@@ -109,6 +109,7 @@ http_200(){
   unlink "$body"
 }
 service_checks(){ http_200 https://the-bot.ru/auth 'id="auth-heading">ВХОД</h1>' && http_200 https://avito.the-bot.ru/healthz '"status":"ok"'; }
+public_root_reachable(){ http_200 https://the-bot.ru/; }
 public_root_check(){ http_200 https://the-bot.ru/ 'href="https://the-bot.ru/auth">Войти</a>'; }
 public_full_check(){ public_root_check && http_200 https://the-bot.ru/schools/ 'Платформа для управления репетиторским центром' && http_200 https://the-bot.ru/site.webmanifest && http_200 https://the-bot.ru/assets/brand/favicon.ico && service_checks; }
 record_path(){ printf '%s/%s.record' "$records_root" "$1"; }
@@ -246,6 +247,14 @@ validate_caddy_routes(){
     END { exit !(targets==1 && !inside && routes==1) }
   ' "$1" || fail caddy_routes
 }
+validate_live_caddy(){
+  local file=$1 root_uid=0
+  [[ $test_mode == 1 ]] && root_uid=$(id -u)
+  [[ -f $file && ! -L $file && $(realpath "$file") == "$file" && $(stat_value %F "$file") == 'regular file' && $(stat_value %u "$file") == "$root_uid" && $(stat_value %a "$file") == 644 && $(stat_value %h "$file") == 1 ]] || fail caddyfile_metadata
+}
+install_live_caddy(){
+  if [[ $test_mode == 0 ]]; then install -o root -g root -m 0644 "$1" "$2"; else install -m 0644 "$1" "$2"; fi
+}
 render_caddy(){
   local source=$1 target=$2 status=0
   awk '
@@ -269,7 +278,7 @@ render_caddy(){
 }
 restore_caddy(){
   local backup=$1 temporary="${caddyfile}.restore-$$"
-  cp -p "$backup" "$temporary"; fsync_path "$temporary"; mv -f "$temporary" "$caddyfile"; fsync_path "$(dirname "$caddyfile")"
+  install_live_caddy "$backup" "$temporary"; fsync_path "$temporary"; mv -f "$temporary" "$caddyfile"; fsync_path "$(dirname "$caddyfile")"; validate_live_caddy "$caddyfile"
   caddy validate --config "$caddyfile" --adapter caddyfile >/dev/null && systemctl reload caddy
 }
 apply_routing(){
@@ -278,13 +287,13 @@ apply_routing(){
   validate_roots; record=$(record_path "$deployment"); validate_record "$record"; [[ $(record_value "$record" state) == prepared || $(record_value "$record" state) == routing-ready ]] || fail prepared_record
   source=$(record_value "$record" source); digest=$(record_value "$record" digest); release=$(record_value "$record" release); previous=$(record_value "$record" previous); release_hash=$(record_value "$record" release_sha)
   [[ -d $release && $(release_sha "$release") == "$release_hash" ]] || fail release_identity
-  [[ -f $caddyfile && ! -L $caddyfile && $(realpath "$caddyfile") == "$caddyfile" ]] || fail caddyfile; current_sha=$(sha256_file "$caddyfile")
+  validate_live_caddy "$caddyfile"; current_sha=$(sha256_file "$caddyfile")
   if [[ $current_sha != "$expected_caddy_sha" && -e $routing_state ]]; then
     validate_private_file "$routing_state" 2 || fail caddy_sha
     state_baseline=$(record_value "$routing_state" baseline); state_sha=$(record_value "$routing_state" routed)
     [[ $state_baseline == "$expected_caddy_sha" && $state_sha == "$current_sha" ]] || fail caddy_routing_state
     validate_caddy_shape "$caddyfile"; validate_caddy_routes "$caddyfile"
-    public_root_check && service_checks || fail caddy_reuse_health
+    public_root_reachable && service_checks || fail caddy_reuse_health
     journal=$(journal_path routing "$deployment"); write_journal "$journal" routing intent "$deployment" "$source" "$digest" "$release" "$previous" "$current_sha" "$current_sha" "$release_hash"
     checkpoint routing_before_record
     write_record "$record" routing-ready "$source" "$digest" "$release" "$previous" "$current_sha" "$release_hash"
@@ -312,18 +321,18 @@ apply_routing(){
   if [[ $current_sha == "$expected_caddy_sha" ]]; then
     write_journal "$journal" routing caddy-changing "$deployment" "$source" "$digest" "$release" "$previous" "$expected_caddy_sha" "$routed_sha" "$release_hash"
     checkpoint routing_before_caddy
-    install -m 0644 "$candidate" "${caddyfile}.candidate-$$"; fsync_path "${caddyfile}.candidate-$$"; mv -f "${caddyfile}.candidate-$$" "$caddyfile"; fsync_path "$(dirname "$caddyfile")"
+    install_live_caddy "$candidate" "${caddyfile}.candidate-$$"; fsync_path "${caddyfile}.candidate-$$"; mv -f "${caddyfile}.candidate-$$" "$caddyfile"; fsync_path "$(dirname "$caddyfile")"; validate_live_caddy "$caddyfile"
     checkpoint routing_after_caddy
   fi
   write_journal "$journal" routing caddy-installed "$deployment" "$source" "$digest" "$release" "$previous" "$expected_caddy_sha" "$routed_sha" "$release_hash"
   checkpoint routing_before_reload
   if ! caddy validate --config "$caddyfile" --adapter caddyfile >/dev/null || ! systemctl reload caddy; then routing_failure=1; fi
   checkpoint routing_after_reload
-  if ((routing_failure==0)) && { ! public_root_check || ! service_checks; }; then routing_failure=1; fi
+  if ((routing_failure==0)) && { ! public_root_reachable || ! service_checks; }; then routing_failure=1; fi
   if ((routing_failure)); then
     write_journal "$journal" routing restoring "$deployment" "$source" "$digest" "$release" "$previous" "$expected_caddy_sha" "$routed_sha" "$release_hash"
     restore_caddy "$backup" || fail caddy_restore_ambiguous
-    public_root_check && service_checks || fail caddy_restore_health_ambiguous
+    public_root_reachable && service_checks || fail caddy_restore_health_ambiguous
     write_journal "$journal" routing rolled-back "$deployment" "$source" "$digest" "$release" "$previous" "$expected_caddy_sha" "$routed_sha" "$release_hash"
     fail caddy_routing_rolled_back
   fi
@@ -382,7 +391,7 @@ rollback_release(){
     temporary="$landing_root/.rollback-${deployment}-$$"; ln -s "$previous" "$temporary"; replace_symlink "$temporary" "$current_link"; fsync_path "$landing_root"
     checkpoint rollback_after_symlink
   fi
-  public_root_check && service_checks || fail rollback_postcheck_ambiguous
+  public_root_reachable && service_checks || fail rollback_postcheck_ambiguous
   write_journal "$journal" rollback verified "$deployment" "$source" "$digest" "$release" "$previous" "$routing_sha" "$routing_sha" "$release_hash"
   checkpoint rollback_before_record
   write_record "$record" rolled-back "$source" "$digest" "$release" "$previous" "$routing_sha" "$release_hash"
