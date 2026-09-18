@@ -56,7 +56,8 @@ const entries=execFileSync("tar",["-tzf",archiveA],{encoding:"utf8"});
 for(const required of ["site/index.html","site/schools/index.html","site/site.webmanifest","site/assets/brand/favicon.ico"])assert.match(entries,new RegExp(`^${required.replaceAll(".","\\.")}$`,"m"));
 assert.doesNotMatch(entries,/deployment|AGENTS|check-site\.mjs|\.governance/);
 
-const caddy=`the-bot.ru {\n  @landing path / /index.html /privacy.html /terms.html /contacts.html /legal.css /release.html /logo.png /icon.png /problem-rules.png\n  handle @landing {\n    root * /var/www/the-bot-landing/current\n    file_server\n  }\n  reverse_proxy 127.0.0.1:3001\n}\n`;
+const unrelatedSite=`other.the-bot.ru {\n  @other path / /privacy.html /legal.css\n  handle @other {\n    root * /srv/other-site\n    file_server\n  }\n  reverse_proxy 127.0.0.1:3001\n}\n`;
+const caddy=`the-bot.ru {\n  @landing path / /index.html /privacy.html /terms.html /contacts.html /legal.css /release.html /logo.png /icon.png /problem-rules.png\n  handle @landing {\n    root * /var/www/the-bot-landing/current\n    file_server\n  }\n  reverse_proxy 127.0.0.1:3001\n}\n${unrelatedSite}`;
 function makeFixture(label,archiveBody=bodyA,chosenDeployment=deployment){
   const fixture=temporaryDirectory(`landing-operator-${label}-`),www=path.join(fixture,"www"),uploads=path.join(fixture,"uploads"),state=path.join(fixture,"state"),mockbin=path.join(fixture,"bin");
   for(const directory of [www,path.join(www,"releases"),path.join(www,"deployments"),uploads,state,mockbin]){mkdirSync(directory,{recursive:true,mode:0o700});chmodSync(directory,0o700)}
@@ -91,7 +92,8 @@ const fixtureData=makeFixture("main"),{fixture,www,uploads,state,previous,caddyP
 let result=run("bash",[harness,"prepare",copy,source,sha(bodyA),deployment]);assert.equal(result.status,0,result.stderr);assert.match(result.stdout,/LANDING_RELEASE_PREPARED/);
 const record=path.join(www,"deployments",`${deployment}.record`);assert.match(readFileSync(record,"utf8"),/state=prepared/);
 result=run("bash",[harness,"routing",deployment],{env:{...process.env,MOCK_PUBLIC_FAIL:"1"}});assert.notEqual(result.status,0);assert.equal(readFileSync(caddyPath,"utf8"),caddy,"failed routing must restore exact Caddy bytes");assert.match(readFileSync(record,"utf8"),/state=prepared/);
-result=run("bash",[harness,"routing",deployment]);assert.equal(result.status,0,result.stderr);assert.match(readFileSync(caddyPath,"utf8"),/\/site\.webmanifest \/assets\/brand\/\* \/schools \/schools\/\*/);assert.match(readFileSync(record,"utf8"),/state=routing-ready/);
+result=run("bash",[harness,"routing",deployment]);assert.equal(result.status,0,result.stderr);
+const routedCaddy=readFileSync(caddyPath,"utf8");assert.match(routedCaddy,/\/site\.webmanifest \/assets\/brand\/\* \/schools \/schools\/\*/);assert.equal(routedCaddy.split("/site.webmanifest /assets/brand/* /schools /schools/*").length-1,1);assert.ok(routedCaddy.endsWith(unrelatedSite),"routing must preserve the unrelated site block byte-for-byte");assert.match(readFileSync(record,"utf8"),/state=routing-ready/);
 result=run("bash",[harness,"deploy",deployment]);assert.equal(result.status,0,result.stderr);assert.equal(readlinkSync(path.join(www,"current")),path.join(www,"releases",deployment));assert.match(readFileSync(record,"utf8"),/state=active/);
 result=run("bash",[harness,"rollback",deployment]);assert.equal(result.status,0,result.stderr);assert.equal(readlinkSync(path.join(www,"current")),previous);assert.match(readFileSync(record,"utf8"),/state=rolled-back/);
 const nextDeployment=deployment.replace(/01$/,"05"),nextArchive=path.join(uploads,`the-bot-landing-${nextDeployment}.tar.gz`);writeFileSync(nextArchive,bodyA,{mode:0o600});chmodSync(nextArchive,0o600);

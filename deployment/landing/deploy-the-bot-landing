@@ -207,13 +207,65 @@ prepare_release(){
   printf 'LANDING_RELEASE_PREPARED source=%s deployment=%s previous=%s\n' "$source" "$deployment" "$previous"
 }
 validate_caddy_shape(){
-  [[ $(grep -Fc 'root * /var/www/the-bot-landing/current' "$1") == 1 ]] || fail caddy_root
-  [[ $(grep -Fc 'reverse_proxy 127.0.0.1:3001' "$1") == 1 ]] || fail caddy_fallback
+  local status=0
+  awk '
+    BEGIN { targets=0; inside=0; depth=0; roots=0; fallbacks=0 }
+    /^[[:space:]]*the-bot\.ru[[:space:]]*\{[[:space:]]*$/ && !inside {
+      targets++; inside=1; depth=0
+    }
+    inside {
+      if ($0 ~ /^[[:space:]]*root[[:space:]]+\*[[:space:]]+\/var\/www\/the-bot-landing\/current([[:space:]]|$)/) roots++
+      if ($0 ~ /^[[:space:]]*reverse_proxy[[:space:]]+127\.0\.0\.1:3001([[:space:]]|$)/) fallbacks++
+      line=$0; opens=gsub(/\{/, "{", line); closes=gsub(/\}/, "}", line); depth+=opens-closes
+      if (depth==0) inside=0
+    }
+    END {
+      if (inside || targets!=1) exit 41
+      if (roots!=1) exit 42
+      if (fallbacks!=1) exit 43
+    }
+  ' "$1" || status=$?
+  case $status in
+    0) return;;
+    42) fail caddy_root;;
+    43) fail caddy_fallback;;
+    *) fail caddy_site;;
+  esac
+}
+validate_caddy_routes(){
+  awk '
+    BEGIN { targets=0; inside=0; depth=0; routes=0 }
+    /^[[:space:]]*the-bot\.ru[[:space:]]*\{[[:space:]]*$/ && !inside {
+      targets++; inside=1; depth=0
+    }
+    inside {
+      if (index($0, "/site.webmanifest /assets/brand/* /schools /schools/*")) routes++
+      line=$0; opens=gsub(/\{/, "{", line); closes=gsub(/\}/, "}", line); depth+=opens-closes
+      if (depth==0) inside=0
+    }
+    END { exit !(targets==1 && !inside && routes==1) }
+  ' "$1" || fail caddy_routes
 }
 render_caddy(){
-  local source=$1 target=$2
-  awk 'BEGIN{n=0} index($0," path ")&&index($0," / ")&&index($0," /privacy.html")&&index($0," /legal.css") {print $0 " /site.webmanifest /assets/brand/* /schools /schools/*";n++;next} {print} END{if(n!=1)exit 42}' "$source" >"$target"
-  grep -Fq '/site.webmanifest /assets/brand/* /schools /schools/*' "$target" || fail caddy_routes
+  local source=$1 target=$2 status=0
+  awk '
+    BEGIN { targets=0; inside=0; depth=0; rewrites=0 }
+    /^[[:space:]]*the-bot\.ru[[:space:]]*\{[[:space:]]*$/ && !inside {
+      targets++; inside=1; depth=0
+    }
+    {
+      if (inside && index($0," path ") && index($0," / ") && index($0," /privacy.html") && index($0," /legal.css")) {
+        print $0 " /site.webmanifest /assets/brand/* /schools /schools/*"; rewrites++
+      } else print
+      if (inside) {
+        line=$0; opens=gsub(/\{/, "{", line); closes=gsub(/\}/, "}", line); depth+=opens-closes
+        if (depth==0) inside=0
+      }
+    }
+    END { if (inside || targets!=1 || rewrites!=1) exit 42 }
+  ' "$source" >"$target" || status=$?
+  [[ $status == 0 ]] || fail caddy_routes
+  validate_caddy_shape "$target"; validate_caddy_routes "$target"
 }
 restore_caddy(){
   local backup=$1 temporary="${caddyfile}.restore-$$"
@@ -231,7 +283,7 @@ apply_routing(){
     validate_private_file "$routing_state" 2 || fail caddy_sha
     state_baseline=$(record_value "$routing_state" baseline); state_sha=$(record_value "$routing_state" routed)
     [[ $state_baseline == "$expected_caddy_sha" && $state_sha == "$current_sha" ]] || fail caddy_routing_state
-    validate_caddy_shape "$caddyfile"; grep -Fq '/site.webmanifest /assets/brand/* /schools /schools/*' "$caddyfile" || fail caddy_routes
+    validate_caddy_shape "$caddyfile"; validate_caddy_routes "$caddyfile"
     public_root_check && service_checks || fail caddy_reuse_health
     journal=$(journal_path routing "$deployment"); write_journal "$journal" routing intent "$deployment" "$source" "$digest" "$release" "$previous" "$current_sha" "$current_sha" "$release_hash"
     checkpoint routing_before_record
